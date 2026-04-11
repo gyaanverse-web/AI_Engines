@@ -1,0 +1,6 @@
+Flask
+mpxpy
+openai
+python-dotenv
+qdrant-client
+dotenv
