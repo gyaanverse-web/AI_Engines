@@ -62,6 +62,12 @@ def _normalize_latex_text(text: str) -> str:
     for source, target in replacements.items():
         cleaned = cleaned.replace(source, target)
 
+    previous = None
+    while previous != cleaned:
+        previous = cleaned
+        cleaned = re.sub(r"\\text\{([^{}]*)\}", r"\1", cleaned)
+        cleaned = re.sub(r"\\boxed\{([^{}]*)\}", r"\1", cleaned)
+
     cleaned = re.sub(r"\$\$(.*?)\$\$", r"\1", cleaned)
     cleaned = re.sub(r"\$(.*?)\$", r"\1", cleaned)
     cleaned = re.sub(r"(\d)(m/s\^2|m/s|kg|cm|mm|km|m|s)\b", r"\1 \\mathrm{\2}", cleaned)
@@ -736,6 +742,10 @@ def evaluate_ocr_steps_with_rag(
     collection_name: str = QDRANT_COLLECTION_NAME,
     top_k: int = 5,
 ):
+    print(
+        "[testing_engine.evaluate_ocr_steps_with_rag] "
+        f"Called with {len(ocr_data)} OCR steps"
+    )
     step_results = []
     question = _normalize_latex_text(question.strip())
 
@@ -921,4 +931,5 @@ def evaluate_ocr_steps_with_rag(
 
         step_results.append(step_result)
 
+    print("[testing_engine.evaluate_ocr_steps_with_rag] Evaluation finished")
     return {"response": step_results}

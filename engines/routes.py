@@ -1,5 +1,6 @@
 from flask import Blueprint, jsonify, request
 
+from analysis_engine import analyzer
 from ocr_engine import get_json_ocr as run_get_json_ocr
 from testing_engine import (
     evaluate_ocr_steps_with_rag,
@@ -20,6 +21,7 @@ def welcome():
 def get_json_ocr():
     data = request.get_json(silent=True) or {}
     source = data.get("source")
+    print(f"[routes.get_json_ocr] Request received for source: {source}")
 
     if not source:
         return jsonify({"error": "source is required"}), 400
@@ -39,6 +41,7 @@ def checked_json_ocr():
     question = data.get("question", "")
     collection_name = data.get("collection_name")
     top_k = data.get("top_k", 5)
+    print("[routes.checked_json_ocr] Request received")
 
     if (not isinstance(ocr_data, list) or not ocr_data) and not solution_url:
         return (
@@ -120,3 +123,27 @@ def index_text_documents():
 @api_routes.route("/evaluated_json_ocr", methods=["POST"])
 def evaluated_json_ocr():
     return "json_ocr evaluated successfully"
+
+
+@api_routes.route("/get_analysis", methods=["POST"])
+def get_analysis():
+    data = request.get_json(silent=True) or {}
+    image_source = data.get("image_source", "")
+    question = data.get("question", "")
+    collection_name = data.get("collection_name")
+    top_k = data.get("top_k", 5)
+    print(f"[routes.get_analysis] Request received for image_source: {image_source}")
+
+    if not image_source:
+        return jsonify({"error": "image_source is required"}), 400
+
+    try:
+        result = analyzer(
+            image_source=image_source,
+            question=question,
+            collection_name=collection_name,
+            top_k=top_k,
+        )
+        return jsonify(result), 200
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500

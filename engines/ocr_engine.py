@@ -38,6 +38,7 @@ import base64
 import json
 import mimetypes
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -46,6 +47,28 @@ from openai import OpenAI
 
 OPENAI_OCR_MODEL = os.getenv("OPENAI_OCR_MODEL", "gpt-4.1-mini")
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0"))
+
+
+def _strip_text_wrappers(text: str) -> str:
+    cleaned = text or ""
+    previous = None
+    while previous != cleaned:
+        previous = cleaned
+        cleaned = re.sub(r"\\text\{([^{}]*)\}", r"\1", cleaned)
+        cleaned = re.sub(r"\\boxed\{([^{}]*)\}", r"\1", cleaned)
+    return " ".join(cleaned.split()).strip()
+
+
+def _clean_ocr_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    cleaned_steps = []
+    for step in steps:
+        cleaned_steps.append(
+            {
+                "stepId": step.get("stepId", ""),
+                "text": _strip_text_wrappers(step.get("text", "")),
+            }
+        )
+    return cleaned_steps
 
 
 def _build_image_input(source: str) -> dict[str, Any]:
@@ -71,6 +94,7 @@ def _build_image_input(source: str) -> dict[str, Any]:
 
 
 def get_json_ocr(source: str):
+    print(f"[ocr_engine.get_json_ocr] Starting OCR for source: {source}")
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
     response = client.responses.create(
@@ -87,8 +111,8 @@ def get_json_ocr(source: str):
                             "or correct any student writing. Preserve the original wording, symbols, order, "
                             "mistakes, and line-by-line structure as closely as possible. Return every line in "
                             "LaTeX-friendly form. Use standard LaTeX for mathematical expressions, symbols, fractions, "
-                            "powers, roots, and equations. Represent ordinary words using \\text{...} when needed "
-                            "inside the same line. Represent units with \\mathrm{...}. Do not use Markdown dollar "
+                            "powers, roots, and equations. Keep ordinary words as plain text whenever possible "
+                            "instead of wrapping them in \\text{...}. Represent units with \\mathrm{...}. Do not use Markdown dollar "
                             "delimiters like $...$ or $$...$$. Do not add explanations, common understanding, missing "
                             "steps, or corrections. Do not rewrite incorrect statements into correct ones. Do not use "
                             "Markdown code fences."
@@ -146,6 +170,9 @@ def get_json_ocr(source: str):
     if isinstance(parsed_output, dict):
         steps = parsed_output.get("steps", [])
         if isinstance(steps, list):
-            return steps
+            cleaned_steps = _clean_ocr_steps(steps)
+            print(f"[ocr_engine.get_json_ocr] OCR completed with {len(cleaned_steps)} steps")
+            return cleaned_steps
 
+    print("[ocr_engine.get_json_ocr] OCR returned no valid steps")
     return []
