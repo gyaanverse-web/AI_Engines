@@ -750,11 +750,17 @@ def evaluate_ocr_steps_with_rag(
     question = _normalize_latex_text(question.strip())
 
     for index, step in enumerate(ocr_data):
+        step_start = __import__("time").monotonic()
         step_id = step.get("stepId", str(uuid.uuid4()))
         step_text = _normalize_latex_text(step.get("text", "").strip())
 
         if not step_text:
             continue
+
+        print(
+            "[testing_engine.evaluate_ocr_steps_with_rag] "
+            f"Processing step {index + 1}/{len(ocr_data)} (stepId={step_id})"
+        )
 
         local_context = _build_local_step_context(ocr_data, index)
         retrieval_query = (
@@ -762,13 +768,20 @@ def evaluate_ocr_steps_with_rag(
             if question
             else f"Step: {step_text}\nNearby steps:\n{local_context}"
         )
+        retrieval_start = __import__("time").monotonic()
         relevant_chunks = retrieve_relevant_chunks(
             query=retrieval_query,
             collection_name=collection_name,
             top_k=top_k,
         )
+        print(
+            "[testing_engine.evaluate_ocr_steps_with_rag] "
+            f"Step {step_id} retrieval returned {len(relevant_chunks)} chunks in "
+            f"{__import__('time').monotonic() - retrieval_start:.2f}s"
+        )
         context = "\n\n".join(chunk["text"] for chunk in relevant_chunks)
 
+        model_start = __import__("time").monotonic()
         response = openai_client.responses.create(
             model=OPENAI_CHAT_MODEL,
             # Previous config for rollback:
@@ -908,6 +921,10 @@ def evaluate_ocr_steps_with_rag(
                 }
             },
         )
+        print(
+            "[testing_engine.evaluate_ocr_steps_with_rag] "
+            f"Step {step_id} model call finished in {__import__('time').monotonic() - model_start:.2f}s"
+        )
 
         step_result = _align_step_result(json.loads(response.output_text))
         step_result = _apply_rule_override(step_result, _step_type_check(step_text))
@@ -930,6 +947,10 @@ def evaluate_ocr_steps_with_rag(
         )
 
         step_results.append(step_result)
+        print(
+            "[testing_engine.evaluate_ocr_steps_with_rag] "
+            f"Step {step_id} completed in {__import__('time').monotonic() - step_start:.2f}s"
+        )
 
     print("[testing_engine.evaluate_ocr_steps_with_rag] Evaluation finished")
     return {"response": step_results}

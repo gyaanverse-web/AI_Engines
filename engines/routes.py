@@ -2,11 +2,7 @@ from flask import Blueprint, jsonify, request
 
 from analysis_engine import analyzer
 from ocr_engine import get_json_ocr as run_get_json_ocr
-from testing_engine import (
-    evaluate_ocr_steps_with_rag,
-    index_documents as run_index_documents,
-    index_text_documents as run_index_text_documents,
-)
+from testing_engine import index_documents as run_index_documents, index_text_documents as run_index_text_documents
 
 
 api_routes = Blueprint("api_routes", __name__)
@@ -50,25 +46,13 @@ def checked_json_ocr():
         )
 
     try:
-        if (not isinstance(ocr_data, list) or not ocr_data) and solution_url:
-            ocr_data = run_get_json_ocr(solution_url)
-
-        if not isinstance(ocr_data, list) or not ocr_data:
-            return jsonify({"error": "Unable to extract OCR data from solution_url"}), 400
-
-        if collection_name:
-            result = evaluate_ocr_steps_with_rag(
-                ocr_data=ocr_data,
-                question=question,
-                collection_name=collection_name,
-                top_k=top_k,
-            )
-        else:
-            result = evaluate_ocr_steps_with_rag(
-                ocr_data=ocr_data,
-                question=question,
-                top_k=top_k,
-            )
+        result = analyzer(
+            image_source=solution_url or "",
+            question=question,
+            collection_name=collection_name,
+            top_k=top_k,
+            ocr_data=ocr_data if isinstance(ocr_data, list) and ocr_data else None,
+        )
         return jsonify(result), 200
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
@@ -138,12 +122,7 @@ def get_analysis():
         return jsonify({"error": "image_source is required"}), 400
 
     try:
-        result = analyzer(
-            image_source=image_source,
-            question=question,
-            collection_name=collection_name,
-            top_k=top_k,
-        )
+        result = analyzer(image_source=image_source, question=question, collection_name=collection_name, top_k=top_k)
         return jsonify(result), 200
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500

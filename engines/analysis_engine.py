@@ -1,15 +1,21 @@
+from typing import Any
+
 from ocr_engine import get_json_ocr
 from testing_engine import evaluate_ocr_steps_with_rag
 
 
 def analyzer(
-    image_source: str,
+    image_source: str = "",
     question: str = "",
     collection_name: str | None = None,
     top_k: int = 5,
+    ocr_data: list[dict[str, Any]] | None = None,
 ):
-    print(f"[analysis_engine.analyzer] Called with image_source: {image_source}")
-    ocr_data = get_json_ocr(image_source)
+    if ocr_data is None:
+        if not image_source:
+            raise ValueError("image_source or ocr_data is required")
+        ocr_data = get_json_ocr(image_source)
+
     print(f"[analysis_engine.analyzer] OCR returned {len(ocr_data)} steps")
 
     if collection_name:
@@ -28,5 +34,5 @@ def analyzer(
     print("[analysis_engine.analyzer] Evaluation completed")
 
     return {
-        "evaluated_response": evaluated_response,
+        "response": evaluated_response.get("response", evaluated_response),
     }

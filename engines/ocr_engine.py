@@ -72,6 +72,12 @@ def _clean_ocr_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _build_image_input(source: str) -> dict[str, Any]:
+    if source.startswith("data:image/"):
+        return {
+            "type": "input_image",
+            "image_url": source,
+        }
+
     if source.startswith(("http://", "https://")):
         return {
             "type": "input_image",
@@ -94,7 +100,7 @@ def _build_image_input(source: str) -> dict[str, Any]:
 
 
 def get_json_ocr(source: str):
-    print(f"[ocr_engine.get_json_ocr] Starting OCR for source: {source}")
+    # print(f"[ocr_engine.get_json_ocr] Starting OCR for source: {source}")
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
     response = client.responses.create(
