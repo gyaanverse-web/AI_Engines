@@ -1,7 +1,7 @@
 from typing import Any
 
 from ocr_engine import get_json_ocr
-from testing_engine import evaluate_ocr_steps_with_rag
+from testing_engine import evaluate_ocr_steps
 
 
 def analyzer(
@@ -18,19 +18,10 @@ def analyzer(
 
     print(f"[analysis_engine.analyzer] OCR returned {len(ocr_data)} steps")
 
-    if collection_name:
-        evaluated_response = evaluate_ocr_steps_with_rag(
-            ocr_data=ocr_data,
-            question=question,
-            collection_name=collection_name,
-            top_k=top_k,
-        )
-    else:
-        evaluated_response = evaluate_ocr_steps_with_rag(
-            ocr_data=ocr_data,
-            question=question,
-            top_k=top_k,
-        )
+    evaluated_response = evaluate_ocr_steps(
+        ocr_data=ocr_data,
+        question=question,
+    )
     print("[analysis_engine.analyzer] Evaluation completed")
 
     return {

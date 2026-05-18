@@ -18,6 +18,7 @@ OPENAI_EMBEDDING_MODEL = os.getenv(
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0"))
 OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "high")
 OPENAI_TEXT_VERBOSITY = os.getenv("OPENAI_TEXT_VERBOSITY", "low")
+OPENAI_DIRECT_REASONING_EFFORT = os.getenv("OPENAI_DIRECT_REASONING_EFFORT", "low")
 QDRANT_COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME", "")
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
@@ -531,6 +532,80 @@ def _verify_numeric_step(
     return _align_step_result(step_result)
 
 
+def _normalize_ocr_steps(ocr_data: list[dict[str, Any]]) -> list[dict[str, str]]:
+    normalized_steps = []
+    for index, step in enumerate(ocr_data, start=1):
+        step_id = str(step.get("stepId", index))
+        step_text = _normalize_latex_text(step.get("text", "").strip())
+        if not step_text:
+            continue
+        normalized_steps.append({"stepId": step_id, "text": step_text})
+    return normalized_steps
+
+
+def _post_process_step_result(
+    step_result: dict[str, Any],
+    ocr_data: list[dict[str, str]],
+    question: str,
+    index: int,
+) -> dict[str, Any]:
+    step_text = _normalize_latex_text(step_result.get("text", "").strip())
+    step_result["text"] = step_text
+    local_context = _build_local_step_context(ocr_data, index)
+
+    step_result = _align_step_result(step_result)
+    step_result = _apply_rule_override(step_result, _step_type_check(step_text))
+    step_result = _apply_rule_override(
+        step_result,
+        _formula_checker(step_text, question, local_context),
+    )
+    step_result = _apply_deterministic_step_checks(
+        step_result=step_result,
+        question=question,
+        step_text=step_text,
+        local_context=local_context,
+    )
+    return step_result
+
+
+def _coerce_step_results(
+    ocr_data: list[dict[str, str]],
+    raw_results: list[dict[str, Any]],
+    question: str,
+) -> list[dict[str, Any]]:
+    raw_by_step_id = {
+        str(item.get("stepId", "")): item
+        for item in raw_results
+        if isinstance(item, dict)
+    }
+    final_results = []
+
+    for index, original_step in enumerate(ocr_data):
+        step_id = original_step["stepId"]
+        raw_step = raw_by_step_id.get(step_id, {})
+        step_result = {
+            "stepId": step_id,
+            "text": raw_step.get("text", original_step["text"]),
+            "step_status": raw_step.get("step_status", "unknown"),
+            "step_weight": raw_step.get("step_weight", 0.5),
+            "topic": _normalize_whitespace(str(raw_step.get("topic", ""))),
+            "step_understanding": _normalize_whitespace(
+                str(raw_step.get("step_understanding", ""))
+            ),
+            "description": str(raw_step.get("description", "")),
+        }
+        final_results.append(
+            _post_process_step_result(
+                step_result=step_result,
+                ocr_data=ocr_data,
+                question=question,
+                index=index,
+            )
+        )
+
+    return final_results
+
+
 def create_qdrant_collection(collection_name: str = QDRANT_COLLECTION_NAME):
     if qdrant_client.collection_exists(collection_name=collection_name):
         return collection_name
@@ -734,6 +809,111 @@ def generate_document_answer(
         "answer": response.output_text,
         "sources": relevant_chunks,
     }
+
+
+def evaluate_ocr_steps(
+    ocr_data: list[dict[str, Any]],
+    question: str = "",
+):
+    normalized_steps = _normalize_ocr_steps(ocr_data)
+    print(
+        "[testing_engine.evaluate_ocr_steps] "
+        f"Called with {len(normalized_steps)} OCR steps"
+    )
+
+    if not normalized_steps:
+        return {"response": []}
+
+    question = _normalize_latex_text(question.strip())
+    response = openai_client.responses.create(
+        model=OPENAI_CHAT_MODEL,
+        reasoning={"effort": OPENAI_DIRECT_REASONING_EFFORT},
+        input=[
+            {
+                "role": "system",
+                "content": (
+                    "You are a strict JSON-only evaluator for step-by-step student solutions. "
+                    "You will receive a question and an ocr_data array. "
+                    "Evaluate every step in one pass using only the given question and the provided steps. "
+                    "Return only valid JSON with a top-level key 'response'. "
+                    "Each response item must keep the same stepId and text for its step. "
+                    "step_status must be exactly one of: right, wrong, unknown, incomplete. "
+                    "topic must be a short academic topic. "
+                    "step_understanding must be one concise line about the student's intent. "
+                    "step_weight must be between 0 and 1. "
+                    "For wrong steps, description must follow: "
+                    "'Error: <exact issue>; Correct step: <correction>'. "
+                    "For incomplete steps, description must follow: "
+                    "'Missing: <missing part>; Correct step: <what should be added>'. "
+                    "For right steps, keep description empty. "
+                    "Never add extra fields. Never return markdown."
+                ),
+            },
+            {
+                "role": "user",
+                "content": json.dumps(
+                    {
+                        "question": question or "Not provided",
+                        "ocr_data": normalized_steps,
+                    },
+                    ensure_ascii=True,
+                ),
+            },
+        ],
+        text={
+            "verbosity": OPENAI_TEXT_VERBOSITY,
+            "format": {
+                "type": "json_schema",
+                "name": "bulk_step_evaluation",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "additionalProperties": False,
+                    "properties": {
+                        "response": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "additionalProperties": False,
+                                "properties": {
+                                    "stepId": {"type": "string"},
+                                    "text": {"type": "string"},
+                                    "step_status": {
+                                        "type": "string",
+                                        "enum": ["right", "wrong", "unknown", "incomplete"],
+                                    },
+                                    "step_weight": {
+                                        "type": "number",
+                                        "minimum": 0,
+                                        "maximum": 1,
+                                    },
+                                    "topic": {"type": "string"},
+                                    "step_understanding": {"type": "string"},
+                                    "description": {"type": "string"},
+                                },
+                                "required": [
+                                    "stepId",
+                                    "text",
+                                    "step_status",
+                                    "step_weight",
+                                    "topic",
+                                    "step_understanding",
+                                    "description",
+                                ],
+                            },
+                        }
+                    },
+                    "required": ["response"],
+                },
+            }
+        },
+    )
+
+    parsed_response = json.loads(response.output_text)
+    raw_results = parsed_response.get("response", []) if isinstance(parsed_response, dict) else []
+    final_results = _coerce_step_results(normalized_steps, raw_results, question)
+    print("[testing_engine.evaluate_ocr_steps] Evaluation finished")
+    return {"response": final_results}
 
 
 def evaluate_ocr_steps_with_rag(
