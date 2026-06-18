@@ -1,7 +1,7 @@
 from typing import Any
 
-from ocr_engine import get_json_ocr
-from testing_engine import evaluate_ocr_steps
+from .ocr_engine import get_json_ocr
+from .testing_engine import evaluate_ocr_steps
 
 
 def analyzer(

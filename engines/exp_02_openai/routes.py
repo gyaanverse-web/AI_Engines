@@ -1,11 +1,14 @@
 from flask import Blueprint, jsonify, request
 
-from analysis_engine import analyzer
-from ocr_engine import get_json_ocr as run_get_json_ocr
-from testing_engine import index_documents as run_index_documents, index_text_documents as run_index_text_documents
+from .modules.analysis_engine import analyzer
+from .modules.ocr_engine import get_json_ocr as run_get_json_ocr
+from .modules.testing_engine import (
+    index_documents as run_index_documents,
+    index_text_documents as run_index_text_documents,
+)
 
 
-api_routes = Blueprint("api_routes", __name__)
+api_routes = Blueprint("openai_routes", __name__)
 
 
 @api_routes.route("/", methods=["GET"])

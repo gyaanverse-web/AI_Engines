@@ -1,6 +1,6 @@
 Flask
-mpxpy
-openai
+google-genai
+httpx
 python-dotenv
 qdrant-client
-dotenv
+
