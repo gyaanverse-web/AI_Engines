@@ -5,11 +5,13 @@ from flask import Flask
 
 load_dotenv(Path(__file__).resolve().parent / ".env")
 
-from routes import api_routes
+from exp_01_gemini.routes import api_routes as gemini_routes
+from exp_02_openai.routes import api_routes as openai_routes
 
 
 app = Flask(__name__)
-app.register_blueprint(api_routes)
+app.register_blueprint(openai_routes, url_prefix="/openai")
+app.register_blueprint(gemini_routes, url_prefix="/gemini")
 
 if __name__ == "__main__":
     app.run(debug=True)
