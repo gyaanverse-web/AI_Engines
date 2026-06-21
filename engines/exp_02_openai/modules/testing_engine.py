@@ -608,7 +608,21 @@ def _coerce_step_results(
 
 def create_qdrant_collection(collection_name: str = QDRANT_COLLECTION_NAME):
     if qdrant_client.collection_exists(collection_name=collection_name):
-        return collection_name
+        collection_info = qdrant_client.get_collection(collection_name=collection_name)
+        vectors_config = collection_info.config.params.vectors
+
+        if isinstance(vectors_config, dict):
+            if len(vectors_config) != 1:
+                qdrant_client.delete_collection(collection_name=collection_name)
+            else:
+                vector_name, vector_params = next(iter(vectors_config.items()))
+                if vector_params.size == EMBEDDING_VECTOR_SIZE:
+                    return collection_name, vector_name
+                qdrant_client.delete_collection(collection_name=collection_name)
+        else:
+            if vectors_config.size == EMBEDDING_VECTOR_SIZE:
+                return collection_name, None
+            qdrant_client.delete_collection(collection_name=collection_name)
 
     qdrant_client.create_collection(
         collection_name=collection_name,
@@ -617,7 +631,7 @@ def create_qdrant_collection(collection_name: str = QDRANT_COLLECTION_NAME):
             distance=Distance.COSINE,
         ),
     )
-    return collection_name
+    return collection_name, None
 
 
 def chunk_document_text(text: str, chunk_size: int = 1500, overlap: int = 200):
@@ -664,7 +678,7 @@ def index_documents(
     documents: list[dict[str, Any]],
     collection_name: str = QDRANT_COLLECTION_NAME,
 ):
-    create_qdrant_collection(collection_name)
+    collection_name, vector_name = create_qdrant_collection(collection_name)
 
     chunk_records = []
     for document in documents:
@@ -686,10 +700,13 @@ def index_documents(
     if chunk_records:
         embeddings = get_embeddings([record["text"] for record in chunk_records])
         for record, embedding in zip(chunk_records, embeddings):
+            vector_payload = (
+                {vector_name: embedding} if vector_name else embedding
+            )
             points.append(
                 PointStruct(
                     id=str(uuid.uuid4()),
-                    vector=embedding,
+                    vector=vector_payload,
                     payload=record,
                 )
             )
@@ -746,10 +763,12 @@ def retrieve_relevant_chunks(
     collection_name: str = QDRANT_COLLECTION_NAME,
     top_k: int = 5,
 ):
+    collection_name, vector_name = create_qdrant_collection(collection_name)
     query_vector = get_embedding(query)
     search_result = qdrant_client.query_points(
         collection_name=collection_name,
         query=query_vector,
+        using=vector_name,
         limit=top_k,
         with_payload=True,
     )

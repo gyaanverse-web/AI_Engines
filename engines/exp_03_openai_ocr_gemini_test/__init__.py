@@ -1,0 +1,20 @@
+from pathlib import Path
+
+from dotenv import load_dotenv
+from flask import Flask
+
+
+def load_environment() -> None:
+    package_dir = Path(__file__).resolve().parent
+    load_dotenv(package_dir.parent / ".env")
+    load_dotenv(package_dir / ".env")
+
+
+def create_app(url_prefix: str = "") -> Flask:
+    load_environment()
+
+    from .routes import api_routes
+
+    app = Flask(__name__)
+    app.register_blueprint(api_routes, url_prefix=url_prefix or "")
+    return app
