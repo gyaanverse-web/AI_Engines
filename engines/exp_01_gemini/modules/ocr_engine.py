@@ -36,13 +36,48 @@ def _strip_text_wrappers(text: str) -> str:
     return " ".join(cleaned.split()).strip()
 
 
+def _repair_latex_ocr_artifacts(text: str) -> str:
+    cleaned = (text or "").strip()
+    if not cleaned:
+        return cleaned
+
+    cleaned = cleaned.replace("$$", "").replace("$", "")
+    cleaned = cleaned.replace("−", "-").replace("–", "-")
+
+    replacements = {
+        " extrm{": r" \mathrm{",
+        "extrm{": r"\mathrm{",
+        " textrm{": r" \mathrm{",
+        "textrm{": r"\mathrm{",
+        " herefore": r" \therefore",
+        "herefore": r"\therefore",
+        " rac{": r" \frac{",
+        "rac{": r"\frac{",
+        " imes ": r" \times ",
+        " imes": r" \times",
+        "imes ": r"\times ",
+    }
+    for source, target in replacements.items():
+        cleaned = cleaned.replace(source, target)
+
+    cleaned = re.sub(r"(?<!\\)frac\{", r"\\frac{", cleaned)
+    cleaned = re.sub(r"(?<!\\)therefore\b", r"\\therefore", cleaned)
+    cleaned = re.sub(r"(?<!\\)boxed\{", r"\\boxed{", cleaned)
+    cleaned = re.sub(r"(?<!\\)mathrm\{", r"\\mathrm{", cleaned)
+    cleaned = re.sub(r"(?<!\\)times\b", r"\\times", cleaned)
+
+    return " ".join(cleaned.split()).strip()
+
+
 def _clean_ocr_steps(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
     cleaned_steps = []
     for step in steps:
         cleaned_steps.append(
             {
                 "stepId": str(step.get("stepId", "")),
-                "text": _strip_text_wrappers(step.get("text", "")),
+                "text": _repair_latex_ocr_artifacts(
+                    _strip_text_wrappers(step.get("text", ""))
+                ),
             }
         )
     return cleaned_steps
@@ -98,7 +133,10 @@ def get_json_ocr(source: str):
             "The 'text' value must be an OCR-faithful LaTeX-style transcription of that line. "
             "Convert the whole line into LaTeX-friendly notation so it can be analyzed by an AI step by step. "
             "Keep wording faithful to the image even if it contains mistakes. If text is unclear, keep the "
-            "uncertain OCR as written instead of correcting it.",
+            "uncertain OCR as written instead of correcting it. "
+            "Never use Markdown math delimiters such as $...$ or $$...$$. "
+            "When a LaTeX command is needed, always include the leading backslash and the full command name, "
+            "for example \\frac{1}{2}, \\times, \\therefore, \\boxed{...}, \\mathrm{m}.",
             types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
         ],
         config=types.GenerateContentConfig(
@@ -112,7 +150,8 @@ def get_json_ocr(source: str):
                 "instead of wrapping them in \\text{...}. Represent units with \\mathrm{...}. Do not use Markdown dollar "
                 "delimiters like $...$ or $$...$$. Do not add explanations, common understanding, missing "
                 "steps, or corrections. Do not rewrite incorrect statements into correct ones. Do not use "
-                "Markdown code fences."
+                "Markdown code fences. If you use a LaTeX command, write the complete command with the leading "
+                "backslash. Never emit broken command fragments such as rac{, imes, herefore, or extrm."
             ),
             response_mime_type="application/json",
             response_schema=schema,

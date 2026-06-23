@@ -3,6 +3,7 @@ from flask import Blueprint, jsonify, request
 from .modules.analysis_engine import analyzer
 from .modules.ocr_engine import get_json_ocr as run_get_json_ocr
 from .modules.testing_engine import (
+    evaluate_ocr_steps_with_rag as run_evaluate_ocr_steps_with_rag,
     index_documents as run_index_documents,
     index_text_documents as run_index_text_documents,
 )
@@ -55,6 +56,37 @@ def checked_json_ocr():
             collection_name=collection_name,
             top_k=top_k,
             ocr_data=ocr_data if isinstance(ocr_data, list) and ocr_data else None,
+        )
+        return jsonify(result), 200
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+
+@api_routes.route("/checked_json_ocr_with_rag", methods=["POST"])
+def checked_json_ocr_with_rag():
+    data = request.get_json(silent=True) or {}
+    ocr_data = data.get("ocr_data")
+    solution_url = data.get("solution_url") or data.get("source")
+    question = data.get("question", "")
+    collection_name = data.get("collection_name")
+    top_k = data.get("top_k", 5)
+    print("[routes.checked_json_ocr_with_rag] Request received")
+
+    if (not isinstance(ocr_data, list) or not ocr_data) and not solution_url:
+        return (
+            jsonify({"error": "Either ocr_data or solution_url is required"}),
+            400,
+        )
+
+    try:
+        if not isinstance(ocr_data, list) or not ocr_data:
+            ocr_data = run_get_json_ocr(solution_url)
+
+        result = run_evaluate_ocr_steps_with_rag(
+            ocr_data=ocr_data,
+            question=question,
+            collection_name=collection_name,
+            top_k=top_k,
         )
         return jsonify(result), 200
     except Exception as exc:

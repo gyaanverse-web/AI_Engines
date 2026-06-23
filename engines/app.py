@@ -7,11 +7,16 @@ load_dotenv(Path(__file__).resolve().parent / ".env")
 
 from exp_01_gemini.routes import api_routes as gemini_routes
 from exp_02_openai.routes import api_routes as openai_routes
+from exp_03_openai_ocr_gemini_test.routes import api_routes as openai_ocr_gemini_test_routes
 
 
 app = Flask(__name__)
 app.register_blueprint(openai_routes, url_prefix="/openai")
 app.register_blueprint(gemini_routes, url_prefix="/gemini")
+app.register_blueprint(
+    openai_ocr_gemini_test_routes,
+    url_prefix="/openai_ocr_gemini_test",
+)
 
 if __name__ == "__main__":
     app.run(debug=True)

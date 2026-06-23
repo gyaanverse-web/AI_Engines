@@ -1,0 +1,7 @@
+Flask
+google-genai
+httpx
+openai
+python-dotenv
+qdrant-client
+
