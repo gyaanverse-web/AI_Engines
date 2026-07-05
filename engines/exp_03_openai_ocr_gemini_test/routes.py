@@ -1,12 +1,9 @@
-from flask import Blueprint, jsonify, request
+import json
+
+from analysis_engine import analyze_question_skill_weightage_with_meta
+from flask import Blueprint, Response, jsonify, request
 
 from .modules.analysis_engine import analyzer
-from .modules.ocr_engine import get_json_ocr as run_get_json_ocr
-from .modules.testing_engine import (
-    evaluate_ocr_steps_with_rag as run_evaluate_ocr_steps_with_rag,
-    index_documents as run_index_documents,
-    index_text_documents as run_index_text_documents,
-)
 
 
 api_routes = Blueprint("openai_ocr_gemini_test_routes", __name__)
@@ -19,6 +16,8 @@ def welcome():
 
 @api_routes.route("/get_json_ocr", methods=["POST"])
 def get_json_ocr():
+    from .modules.ocr_engine import get_json_ocr as run_get_json_ocr
+
     data = request.get_json(silent=True) or {}
     source = data.get("source")
     print(f"[routes.get_json_ocr] Request received for source: {source}")
@@ -64,6 +63,11 @@ def checked_json_ocr():
 
 @api_routes.route("/checked_json_ocr_with_rag", methods=["POST"])
 def checked_json_ocr_with_rag():
+    from .modules.ocr_engine import get_json_ocr as run_get_json_ocr
+    from .modules.testing_engine import (
+        evaluate_ocr_steps_with_rag as run_evaluate_ocr_steps_with_rag,
+    )
+
     data = request.get_json(silent=True) or {}
     ocr_data = data.get("ocr_data")
     solution_url = data.get("solution_url") or data.get("source")
@@ -95,6 +99,8 @@ def checked_json_ocr_with_rag():
 
 @api_routes.route("/index_documents", methods=["POST"])
 def index_documents():
+    from .modules.testing_engine import index_documents as run_index_documents
+
     data = request.get_json(silent=True) or {}
     documents = data.get("documents")
     collection_name = data.get("collection_name")
@@ -117,6 +123,8 @@ def index_documents():
 
 @api_routes.route("/index_text_documents", methods=["POST"])
 def index_text_documents():
+    from .modules.testing_engine import index_text_documents as run_index_text_documents
+
     data = request.get_json(silent=True) or {}
     document_paths = data.get("document_paths")
     collection_name = data.get("collection_name")
@@ -142,6 +150,24 @@ def index_text_documents():
 @api_routes.route("/evaluated_json_ocr", methods=["POST"])
 def evaluated_json_ocr():
     return "json_ocr evaluated successfully"
+
+
+@api_routes.route("/api/v1/question-analysis/analyze", methods=["POST"])
+def analyze_question():
+    data = request.get_json(silent=True)
+
+    try:
+        result = analyze_question_skill_weightage_with_meta(data)
+        return Response(
+            response=json.dumps(result["weights"]),
+            status=200,
+            mimetype="application/json",
+            headers={"X-Question-Analysis-Mode": result["mode"]},
+        )
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
 
 
 @api_routes.route("/get_analysis", methods=["POST"])
