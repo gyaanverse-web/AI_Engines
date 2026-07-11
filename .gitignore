@@ -46,3 +46,8 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Local Vector Database & Testing Data
+qdrant_local_db/
+Data/
+

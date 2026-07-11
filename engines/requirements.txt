@@ -3,4 +3,6 @@ mpxpy
 openai
 python-dotenv
 qdrant-client
-dotenv
+pillow
+sympy
+pypdf
