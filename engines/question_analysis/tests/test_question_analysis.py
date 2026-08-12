@@ -3,23 +3,23 @@ from os import environ
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from exp_04_context_and_step_itr2 import create_app
-from exp_04_context_and_step_itr2.question_analysis.categories import CATEGORY_KEYS
-from exp_04_context_and_step_itr2.question_analysis.ml_classifier import (
+from evaluation_engine import create_app
+from question_analysis.categories import CATEGORY_KEYS
+from question_analysis.ml_classifier import (
     MLClassifierService,
     build_ml_features,
 )
-from exp_04_context_and_step_itr2.question_analysis.ml_training import (
+from question_analysis.ml_training import (
     train_model_from_dataset,
 )
-from exp_04_context_and_step_itr2.question_analysis.normalizer import normalize_scores
-from exp_04_context_and_step_itr2.question_analysis.question_skill_weightage import (
+from question_analysis.normalizer import normalize_scores
+from question_analysis.question_skill_weightage import (
     analyze_question_skill_weightage,
 )
-from exp_04_context_and_step_itr2.question_analysis.scorer import (
+from question_analysis.scorer import (
     calculate_question_skill_weightage,
 )
-from exp_04_context_and_step_itr2.question_analysis.synthetic_dataset import (
+from question_analysis.synthetic_dataset import (
     write_synthetic_dataset,
 )
 

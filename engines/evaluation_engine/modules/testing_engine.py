@@ -1,10 +1,11 @@
+import logging
 import re
 from typing import Any
 
-from ..question_analysis.categories import CATEGORY_KEYS
-from ..question_analysis.normalizer import normalize_scores
-from ..question_analysis.preprocessor import normalize_text
-from ..question_analysis.scorer import calculate_rule_scores
+from question_analysis.categories import CATEGORY_KEYS
+from question_analysis.normalizer import normalize_scores
+from question_analysis.preprocessor import normalize_text
+from question_analysis.scorer import calculate_rule_scores
 from ..system_instruction import (
     RECONSTRUCT_SOLUTION_SYSTEM_INSTRUCTION,
     SOLUTION_PROFILE_SYSTEM_INSTRUCTION,
@@ -17,13 +18,13 @@ from .provider_engine import (
     GEMINI_CHAT_MODEL,
     QDRANT_COLLECTION_NAME,
     RAG_MIN_SCORE,
-    _apply_deterministic_step_checks as _run_deterministic_step_checks,
+    _apply_deterministic_step_checks,
     _decimal_places,
     _extract_assigned_variable,
     _extract_last_number,
     _extract_last_number_text,
     _format_number,
-    _formula_checker as _run_formula_checker,
+    _formula_checker,
     _generate_json_response,
     _normalize_latex_text,
     index_documents,
@@ -54,6 +55,7 @@ STEP_TYPE_CORRECTIONS = {
 }
 QUESTION_PART_PATTERN = re.compile(r"\(([A-Za-z0-9]+)\)\s*")
 STEP_PART_PATTERN = re.compile(r"^\s*(?:\(([A-Za-z0-9]+)\)|([A-Za-z0-9]+)\))\s*")
+logger = logging.getLogger(__name__)
 
 
 def _normalize_whitespace(text: str) -> str:
@@ -86,7 +88,6 @@ def _reconstruct_solution_steps(
     filtered_steps = [step for step in ocr_steps if not _is_numbering_artifact(step["text"])]
     if not filtered_steps:
         filtered_steps = ocr_steps
-
 
     parsed_response = _generate_json_response(
         model=GEMINI_CHAT_MODEL,
@@ -296,7 +297,7 @@ def _get_rag_context(
             top_k=top_k,
         )
     except Exception as exc:
-        print(f"[itr2.testing_engine] Retrieval failed: {exc}")
+        logger.warning("RAG retrieval failed: %s", exc)
         return "", f"retrieval_error: {exc}"
 
     if not relevant_chunks:
@@ -714,9 +715,9 @@ def _post_process_step_result(
 
     step_result = _apply_rule_override(
         step_result,
-        _run_formula_checker(step_text, question, local_context),
+        _formula_checker(step_text, question, local_context),
     )
-    step_result = _run_deterministic_step_checks(
+    step_result = _apply_deterministic_step_checks(
         step_result=step_result,
         question=question,
         step_text=step_text,
@@ -1130,13 +1131,10 @@ def evaluate_ocr_steps(
     full_marks: float | None = None,
 ):
     normalized_steps = _normalize_ocr_steps(ocr_data)
-    print(f"[itr2.testing_engine.evaluate_ocr_steps] Called with {len(normalized_steps)} OCR steps")
+    logger.info("Evaluating %s OCR steps", len(normalized_steps))
     normalized_question = _normalize_latex_text(question.strip())
     reconstructed_steps = _reconstruct_solution_steps(normalized_steps, normalized_question)
-    print(
-        "[itr2.testing_engine.evaluate_ocr_steps] "
-        f"Reconstructed into {len(reconstructed_steps)} logical steps"
-    )
+    logger.info("Reconstructed OCR into %s logical steps", len(reconstructed_steps))
     question_parts = _extract_question_parts(normalized_question)
     annotated_steps, _ = _build_blocks_from_steps(reconstructed_steps, question_parts)
     question_profile = _build_question_profile(normalized_question)
@@ -1146,7 +1144,7 @@ def evaluate_ocr_steps(
         question_profile=question_profile,
         question_parts=question_parts,
     )
-    print("[itr2.testing_engine.evaluate_ocr_steps] Evaluation finished")
+    logger.info("OCR evaluation completed")
     return _build_response_payload(
         steps=annotated_steps,
         final_results=final_results,
@@ -1163,16 +1161,10 @@ def evaluate_ocr_steps_with_rag(
     full_marks: float | None = None,
 ):
     normalized_steps = _normalize_ocr_steps(ocr_data)
-    print(
-        "[itr2.testing_engine.evaluate_ocr_steps_with_rag] "
-        f"Called with {len(normalized_steps)} OCR steps"
-    )
+    logger.info("Evaluating %s OCR steps with RAG", len(normalized_steps))
     normalized_question = _normalize_latex_text(question.strip())
     reconstructed_steps = _reconstruct_solution_steps(normalized_steps, normalized_question)
-    print(
-        "[itr2.testing_engine.evaluate_ocr_steps_with_rag] "
-        f"Reconstructed into {len(reconstructed_steps)} logical steps"
-    )
+    logger.info("Reconstructed OCR into %s logical steps", len(reconstructed_steps))
     question_parts = _extract_question_parts(normalized_question)
     annotated_steps, _ = _build_blocks_from_steps(reconstructed_steps, question_parts)
     question_profile = _build_question_profile(normalized_question)
@@ -1189,7 +1181,7 @@ def evaluate_ocr_steps_with_rag(
         context=context,
         question_parts=question_parts,
     )
-    print("[itr2.testing_engine.evaluate_ocr_steps_with_rag] Evaluation finished")
+    logger.info("RAG-backed OCR evaluation completed")
     return _build_response_payload(
         steps=annotated_steps,
         final_results=final_results,

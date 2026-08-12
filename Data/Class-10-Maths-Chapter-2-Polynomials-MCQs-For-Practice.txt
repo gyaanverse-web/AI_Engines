@@ -1,0 +1,80 @@
+﻿Class 10 Maths Chapter 2 Polynomials MCQs For Practice 
+ 
+1. If one of the zeroes of the quadratic polynomial (k–1) x2 + k x + 1 is –3, then the value of k is 
+(a) 4/3 
+(b) -4/3 
+(c) 2/3 
+(d) -2/3 
+ 
+2. If the zeroes of the quadratic polynomial x2 + (a + 1) x + b are 2 and –3, then 
+(a) a = –7, b = –1  
+(b) a = 5, b = –1 
+(c) a = 2, b = – 6  
+(d) a = 0, b = – 6 
+ 
+3. If one of the zeroes of a quadratic polynomial of the form x2 +ax + b is the negative of the other, then it 
+(a) has no linear term and the constant term is negative 
+(b) has no linear term and the constant term is positive 
+(c) can have a linear term but the constant term is negative 
+(d) can have a linear term but the constant term is positive 
+ 
+4. Given that one of the zeroes of the cubic polynomial ax3 + bx2 + cx + d is zero, the product of the other 
+two zeroes is 
+(a) -c/a 
+(b) c/a 
+(c) 0 
+(d) -b/a 
+ 
+5. The quadratic polynomial whose sum and product of zeroes are -3 and 2, respectively is 
+(a) x2 - 3x + 2 
+(b) x2 - 3x - 2 
+(c) x2 + 3x + 2 
+(d) x2 + 3x – 2 
+ 
+6. The zeroes of the quadratic polynomial x2 + kx + k, k ≠ 0, 
+(a) cannot both be positive  
+(b) cannot both be negative 
+(c) are always unequal  
+(d) are always equal 
+ 
+7. If on division of a non-zero polynomial p(x) by a polynomial g(x), the remainder is zero, then the relation 
+between the degrees of p(x) and g(x) is 
+(a) degree of p(x) < degree of g(x) 
+(b) degree of p(x) = degree of g(x) 
+(c) degree of p(x) > degree of g(x)  
+(d) nothing can be said about degrees of p(x) and g(x) 
+ 
+8. If one of the roots of 4x2 - 3x + k is 1, then the value of k is 
+(a) 2 
+ 
+
+ 
+
+
+
+ 
+ 
+(b) -1 
+(c) -1/2 
+(d) -1/4 
+ 
+9. If p(x) and g(x) are any two polynomials with g(x) ≠ 0, then we can find polynomials q(x) and r(x) such 
+that p(x) = g(x) × q(x) + r(x), where r(x) = 0 or 
+(a)  degree of r(x) > degree of g(x) 
+(b)  degree of r(x) = degree of g(x) 
+(c)  degree of r(x) < degree of g(x) 
+(d)  degree of r(x) < degree of q(x) 
+ 
+10. If the degree of a polynomial is 4, then the maximum number of zeroes of this polynomial is equal to 
+(a) 3 
+(b) 4 
+(c) more than 4 
+(d) 6 
+ 
+ 
+
+* * * * * * * * * * ANSWER KEY * * * * * * * * * * 
+ 
+
+1 - (a)   2 – (d)   3 - (a)   4 - (b)   5 - (c)   
+6 - (a)   7 - (c)  8 - (b)   9 - (c)   10 - (b)

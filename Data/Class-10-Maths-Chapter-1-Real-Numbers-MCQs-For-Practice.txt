@@ -1,0 +1,78 @@
+﻿Class 10 Maths Chapter 1 Real Numbers MCQs For Practice 
+ 
+1. The least number that is divisible by all the numbers from 1 to 10 (both inclusive) is 
+(a) 10  
+(b) 100  
+(c) 504  
+(d) 2520 
+ 
+2. Express 875 as the product of its prime factors. 
+(a) 52 × 7  
+(b) 53 × 7 
+(c) 53 × 3 
+(d) 53 × 32 
+ 
+3. When a number is divided by 11, its remainder will be always 
+(a) greater than 11 
+(b) at least 11 
+(c) less than 11 
+(d) at most 11 
+ 
+4. (4 + 6√3) + (6 – 5√3) is 
+(a) an integer  
+(b) a natural number 
+(c) a rational number 
+(d) an irrational number 
+ 
+5. The expression 3 × 5 × 7 + 7 is a  
+(a) composite number 
+(b) prime number 
+(c) odd number 
+(d) irrational number 
+ 
+6. Two numbers with 18 as their HCF and 3672 as their LCM are 
+(a) 216 and 306 
+(b) 256 and 306 
+(c) 206 and 316 
+(d) 162 and 216 
+ 
+7. HCF of 847 and 2160 is  
+(a) 3 
+(b) 2 
+(c) 1 
+(d) 7 
+ 
+8. Which of the following is irrational number? 
+(a) √2.√8 
+(b) √2.√3 
+(c) √5.√5 
+ 
+
+ 
+
+
+
+ 
+ 
+(d) √125/5 
+ 
+9. For any positive integer n, n3 – n is  
+(a) divisible by 8 
+(b) divisible by 11 
+(c) divisible by 7 
+(d) divisible by 6 
+ 
+10. The decimal expansion of 7/80 will be terminated after 
+(a) two decimal points 
+(b) three decimal points 
+(c) four decimal points 
+(d) one decimal point 
+ 
+ 
+ 
+
+* * * * * * * * * * ANSWER KEY * * * * * * * * * * 
+ 
+
+1 - (d)   2 - (b)   3 - (c)   4 - (d)   5 - (a)  
+6 - (a)   7 - (c)   8 - (b)   9 - (d)   10 - (c)

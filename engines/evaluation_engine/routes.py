@@ -1,54 +1,58 @@
 import json
+import logging
 
 from flask import Blueprint, Response, jsonify, request
 
-from .modules.analysis_engine import analyzer
-from .question_analysis import analyze_question_skill_weightage_with_meta
+from .modules.analysis_engine import analyze_solution
+from question_analysis import analyze_question_skill_weightage_with_meta
 
 
-api_routes = Blueprint("context_and_step_itr2_routes", __name__)
+logger = logging.getLogger(__name__)
+api_blueprint = Blueprint("evaluation_engine_api", __name__)
+# Preserve the original import name for existing application bootstraps.
+api_routes = api_blueprint
 
 
-@api_routes.route("/", methods=["GET"])
-def welcome():
-    return "welcome to flask engine server"
+@api_blueprint.route("/", methods=["GET"])
+def health_check_endpoint():
+    return "context and step evaluation service is running"
 
 
-@api_routes.route("/get_json_ocr", methods=["POST"])
-def get_json_ocr():
-    from .modules.ocr_engine import get_json_ocr as run_get_json_ocr
+@api_blueprint.route("/get_json_ocr", methods=["POST"])
+def extract_ocr_endpoint():
+    from .modules.ocr_engine import extract_ocr_steps
 
     data = request.get_json(silent=True) or {}
     source = data.get("source")
-    print(f"[itr2.routes.get_json_ocr] Request received for source: {source}")
+    logger.info("OCR request received for source: %s", source)
 
     if not source:
         return jsonify({"error": "source is required"}), 400
 
     try:
-        result = run_get_json_ocr(source)
+        result = extract_ocr_steps(source)
         return jsonify({"ocr_data": result}), 200
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
 
-@api_routes.route("/checked_json_ocr", methods=["POST"])
-def checked_json_ocr():
+@api_blueprint.route("/checked_json_ocr", methods=["POST"])
+def evaluate_ocr_endpoint():
     data = request.get_json(silent=True) or {}
     ocr_data = data.get("ocr_data")
-    solution_url = data.get("solution_url") or data.get("source")
+    solution_source = data.get("solution_url") or data.get("source")
     question = data.get("question", "")
     collection_name = data.get("collection_name")
     top_k = data.get("top_k", 5)
     full_marks = data.get("full_marks")
-    print("[itr2.routes.checked_json_ocr] Request received")
+    logger.info("OCR evaluation request received")
 
-    if (not isinstance(ocr_data, list) or not ocr_data) and not solution_url:
+    if (not isinstance(ocr_data, list) or not ocr_data) and not solution_source:
         return jsonify({"error": "Either ocr_data or solution_url is required"}), 400
 
     try:
-        result = analyzer(
-            image_source=solution_url or "",
+        result = analyze_solution(
+            image_source=solution_source or "",
             question=question,
             collection_name=collection_name,
             top_k=top_k,
@@ -60,30 +64,28 @@ def checked_json_ocr():
         return jsonify({"error": str(exc)}), 500
 
 
-@api_routes.route("/checked_json_ocr_with_rag", methods=["POST"])
-def checked_json_ocr_with_rag():
-    from .modules.ocr_engine import get_json_ocr as run_get_json_ocr
-    from .modules.testing_engine import (
-        evaluate_ocr_steps_with_rag as run_evaluate_ocr_steps_with_rag,
-    )
+@api_blueprint.route("/checked_json_ocr_with_rag", methods=["POST"])
+def evaluate_ocr_with_rag_endpoint():
+    from .modules.ocr_engine import extract_ocr_steps
+    from .modules.testing_engine import evaluate_ocr_steps_with_rag
 
     data = request.get_json(silent=True) or {}
     ocr_data = data.get("ocr_data")
-    solution_url = data.get("solution_url") or data.get("source")
+    solution_source = data.get("solution_url") or data.get("source")
     question = data.get("question", "")
     collection_name = data.get("collection_name")
     top_k = data.get("top_k", 5)
     full_marks = data.get("full_marks")
-    print("[itr2.routes.checked_json_ocr_with_rag] Request received")
+    logger.info("RAG-backed OCR evaluation request received")
 
-    if (not isinstance(ocr_data, list) or not ocr_data) and not solution_url:
+    if (not isinstance(ocr_data, list) or not ocr_data) and not solution_source:
         return jsonify({"error": "Either ocr_data or solution_url is required"}), 400
 
     try:
         if not isinstance(ocr_data, list) or not ocr_data:
-            ocr_data = run_get_json_ocr(solution_url)
+            ocr_data = extract_ocr_steps(solution_source)
 
-        result = run_evaluate_ocr_steps_with_rag(
+        result = evaluate_ocr_steps_with_rag(
             ocr_data=ocr_data,
             question=question,
             collection_name=collection_name,
@@ -95,9 +97,9 @@ def checked_json_ocr_with_rag():
         return jsonify({"error": str(exc)}), 500
 
 
-@api_routes.route("/index_documents", methods=["POST"]) 
-def index_documents():
-    from .modules.testing_engine import index_documents as run_index_documents
+@api_blueprint.route("/index_documents", methods=["POST"])
+def index_documents_endpoint():
+    from .modules.testing_engine import index_documents
 
     data = request.get_json(silent=True) or {}
     documents = data.get("documents")
@@ -108,20 +110,20 @@ def index_documents():
 
     try:
         if collection_name:
-            result = run_index_documents(
+            result = index_documents(
                 documents=documents,
                 collection_name=collection_name,
             )
         else:
-            result = run_index_documents(documents=documents)
+            result = index_documents(documents=documents)
         return jsonify(result), 200
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
 
-@api_routes.route("/index_text_documents", methods=["POST"])
-def index_text_documents():
-    from .modules.testing_engine import index_text_documents as run_index_text_documents
+@api_blueprint.route("/index_text_documents", methods=["POST"])
+def index_text_documents_endpoint():
+    from .modules.testing_engine import index_text_documents
 
     data = request.get_json(silent=True) or {}
     document_paths = data.get("document_paths")
@@ -132,24 +134,24 @@ def index_text_documents():
 
     try:
         if collection_name:
-            result = run_index_text_documents(
+            result = index_text_documents(
                 document_paths=document_paths,
                 collection_name=collection_name,
             )
         else:
-            result = run_index_text_documents(document_paths=document_paths)
+            result = index_text_documents(document_paths=document_paths)
         return jsonify(result), 200
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
 
 
-@api_routes.route("/evaluated_json_ocr", methods=["POST"])
-def evaluated_json_ocr():
+@api_blueprint.route("/evaluated_json_ocr", methods=["POST"])
+def evaluation_status_endpoint():
     return "json_ocr evaluated successfully"
 
 
-@api_routes.route("/api/v1/question-analysis/analyze", methods=["POST"])
-def analyze_question():
+@api_blueprint.route("/api/v1/question-analysis/analyze", methods=["POST"])
+def analyze_question_endpoint():
     data = request.get_json(silent=True)
 
     try:
@@ -166,21 +168,21 @@ def analyze_question():
         return jsonify({"error": str(exc)}), 500
 
 
-@api_routes.route("/get_analysis", methods=["POST"])
-def get_analysis():
+@api_blueprint.route("/get_analysis", methods=["POST"])
+def analyze_solution_endpoint():
     data = request.get_json(silent=True) or {}
     image_source = data.get("image_source", "")
     question = data.get("question", "")
     collection_name = data.get("collection_name")
     top_k = data.get("top_k", 5)
     full_marks = data.get("full_marks")
-    print(f"[itr2.routes.get_analysis] Request received for image_source: {image_source}")
+    logger.info("Solution analysis request received for image source: %s", image_source)
 
     if not image_source:
         return jsonify({"error": "image_source is required"}), 400
 
     try:
-        result = analyzer(
+        result = analyze_solution(
             image_source=image_source,
             question=question,
             collection_name=collection_name,

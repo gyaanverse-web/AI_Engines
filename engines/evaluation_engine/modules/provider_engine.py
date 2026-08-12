@@ -1,6 +1,8 @@
-import os
 import json
+import logging
+import os
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -30,7 +32,7 @@ GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0"))
 RAG_MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "0.35"))
 QDRANT_COLLECTION_NAME = os.getenv(
     "QDRANT_COLLECTION_NAME_EXP_04",
-    os.getenv("QDRANT_COLLECTION_NAME", "exp_04_context_and_step_itr2"),
+    os.getenv("QDRANT_COLLECTION_NAME", "evaluation_engine"),
 )
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
@@ -39,6 +41,7 @@ EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
 QDRANT_UPSERT_BATCH_SIZE = int(os.getenv("QDRANT_UPSERT_BATCH_SIZE", "50"))
 QDRANT_TIMEOUT = int(os.getenv("QDRANT_TIMEOUT", "120"))
 NUMERIC_TOLERANCE = float(os.getenv("NUMERIC_TOLERANCE", "0.05"))
+logger = logging.getLogger(__name__)
 
 STANDARD_FORMULAS = {
     "kinematics_displacement": {
@@ -63,7 +66,7 @@ def _get_gemini_sdk():
     except ImportError as exc:
         raise ImportError(
             "Gemini SDK not installed. Install dependencies from "
-            "engines/exp_04_context_and_step_itr2/requirements.txt"
+            "engines/evaluation_engine/requirements.txt"
         ) from exc
 
     return genai, types
@@ -418,7 +421,8 @@ def _formula_checker(step_text: str, question: str, local_context: str) -> dict[
         if not has_half:
             return _make_result(
                 "wrong",
-                r"Error: the displacement formula misses the \frac{1}{2} factor on at^2; Correct step: use S = ut + \frac{1}{2}at^2",
+                r"Error: the displacement formula misses the \frac{1}{2} factor on at^2; "
+                r"Correct step: use S = ut + \frac{1}{2}at^2",
                 step_weight=0.7,
             )
         return _make_result(
@@ -438,8 +442,6 @@ def _apply_deterministic_step_checks(
 ) -> dict[str, Any]:
     variable = _extract_assigned_variable(step_text)
     reported_value = _extract_last_number(step_text)
-    reported_value_text = _extract_last_number_text(step_text)
-    reported_decimals = _decimal_places(reported_value_text)
     expected_unit = _infer_expected_unit(question, local_context, step_text)
     reported_unit = _extract_unit(step_text)
 
@@ -450,12 +452,16 @@ def _apply_deterministic_step_checks(
                 if expected_unit and not reported_unit:
                     step_result["step_status"] = "incomplete"
                     step_result["description"] = (
-                        f"Missing: the unit {expected_unit} is not written; Correct step: write \\therefore {variable} = {_format_number(expected_value)}\\ \\mathrm{{{expected_unit}}}"
+                        f"Missing: the unit {expected_unit} is not written; "
+                        f"Correct step: write \\therefore {variable} = "
+                        f"{_format_number(expected_value)}\\ \\mathrm{{{expected_unit}}}"
                     )
                 elif expected_unit and reported_unit and reported_unit != expected_unit:
                     step_result["step_status"] = "wrong"
                     step_result["description"] = (
-                        f"Error: the numerical value is correct, but the unit {reported_unit} is incorrect; Correct step: write \\therefore {variable} = {_format_number(expected_value)}\\ \\mathrm{{{expected_unit}}}"
+                        f"Error: the numerical value is correct, but the unit {reported_unit} "
+                        f"is incorrect; Correct step: write \\therefore {variable} = "
+                        f"{_format_number(expected_value)}\\ \\mathrm{{{expected_unit}}}"
                     )
                 else:
                     step_result["step_status"] = "right"
@@ -468,11 +474,14 @@ def _apply_deterministic_step_checks(
                 correction = _format_number(expected_value)
                 if expected_unit:
                     step_result["description"] = (
-                        f"Error: the final calculation gives the wrong value for {variable}; Correct step: write \\therefore {variable} = {correction}\\ \\mathrm{{{expected_unit}}}"
+                        f"Error: the final calculation gives the wrong value for {variable}; "
+                        f"Correct step: write \\therefore {variable} = {correction}"
+                        f"\\ \\mathrm{{{expected_unit}}}"
                     )
                 else:
                     step_result["description"] = (
-                        f"Error: the final calculation gives the wrong value for {variable}; Correct step: write \\therefore {variable} = {correction}"
+                        f"Error: the final calculation gives the wrong value for {variable}; "
+                        f"Correct step: write \\therefore {variable} = {correction}"
                     )
 
     return _align_step_result(step_result)
@@ -776,10 +785,10 @@ def index_text_documents(
     collection_name: str = QDRANT_COLLECTION_NAME,
 ):
     documents = []
-    print(f"Starting TXT indexing for {len(document_paths)} documents")
+    logger.info("Starting text indexing for %s documents", len(document_paths))
 
     for document_path in document_paths:
-        print(f"Processing document: {document_path}")
+        logger.info("Indexing document: %s", document_path)
         text_path = Path(document_path)
         if not text_path.exists():
             raise FileNotFoundError(f"Text file not found: {document_path}")
@@ -889,10 +898,7 @@ def evaluate_ocr_steps(
     question: str = "",
 ):
     normalized_steps = _normalize_ocr_steps(ocr_data)
-    print(
-        "[testing_engine.evaluate_ocr_steps] "
-        f"Called with {len(normalized_steps)} OCR steps"
-    )
+    logger.info("Evaluating %s OCR steps", len(normalized_steps))
 
     if not normalized_steps:
         return {"response": []}
@@ -945,7 +951,7 @@ def evaluate_ocr_steps(
     )
     raw_results = parsed_response.get("response", []) if isinstance(parsed_response, dict) else []
     final_results = _coerce_step_results(normalized_steps, raw_results, question)
-    print("[testing_engine.evaluate_ocr_steps] Evaluation finished")
+    logger.info("OCR evaluation completed")
     return {"response": final_results}
 
 
@@ -955,10 +961,7 @@ def evaluate_ocr_steps_with_rag(
     collection_name: str = QDRANT_COLLECTION_NAME,
     top_k: int = 5,
 ):
-    print(
-        "[testing_engine.evaluate_ocr_steps_with_rag] "
-        f"Called with {len(ocr_data)} OCR steps"
-    )
+    logger.info("Evaluating %s OCR steps with RAG", len(ocr_data))
     normalized_steps = _normalize_ocr_steps(ocr_data)
     if not normalized_steps:
         return {
@@ -985,7 +988,7 @@ def evaluate_ocr_steps_with_rag(
             if question
             else f"Step: {step_text}\nNearby steps:\n{local_context}"
         )
-        retrieval_start = __import__("time").monotonic()
+        retrieval_start = time.monotonic()
 
         try:
             relevant_chunks = retrieve_relevant_chunks(
@@ -995,22 +998,21 @@ def evaluate_ocr_steps_with_rag(
             )
         except Exception as exc:
             retrieval_issue = f"retrieval_error: {exc}"
-            print(
-                "[testing_engine.evaluate_ocr_steps_with_rag] "
-                f"Step {step_id} retrieval failed: {exc}"
-            )
+            logger.warning("Step %s retrieval failed: %s", step_id, exc)
             break
 
-        print(
-            "[testing_engine.evaluate_ocr_steps_with_rag] "
-            f"Step {step_id} retrieval returned {len(relevant_chunks)} chunks in "
-            f"{__import__('time').monotonic() - retrieval_start:.2f}s"
+        logger.info(
+            "Step %s retrieval returned %s chunks in %.2fs",
+            step_id,
+            len(relevant_chunks),
+            time.monotonic() - retrieval_start,
         )
         if not _is_grounded_context(relevant_chunks):
             retrieval_issue = "context_issue"
-            print(
-                "[testing_engine.evaluate_ocr_steps_with_rag] "
-                f"Step {step_id} did not meet grounding threshold {RAG_MIN_SCORE:.2f}"
+            logger.warning(
+                "Step %s did not meet grounding threshold %.2f",
+                step_id,
+                RAG_MIN_SCORE,
             )
             break
 
@@ -1024,22 +1026,24 @@ def evaluate_ocr_steps_with_rag(
         )
 
     for index, step in enumerate(normalized_steps):
-        step_start = __import__("time").monotonic()
+        step_start = time.monotonic()
         step_id = step.get("stepId", str(uuid.uuid4()))
         step_text = _normalize_latex_text(step.get("text", "").strip())
 
         if not step_text:
             continue
 
-        print(
-            "[testing_engine.evaluate_ocr_steps_with_rag] "
-            f"Processing step {index + 1}/{len(ocr_data)} (stepId={step_id})"
+        logger.info(
+            "Processing step %s/%s (step_id=%s)",
+            index + 1,
+            len(ocr_data),
+            step_id,
         )
 
         local_context = _build_local_step_context(normalized_steps, index)
         context = grounded_contexts.get(step_id, "")
 
-        model_start = __import__("time").monotonic()
+        model_start = time.monotonic()
         step_result = _generate_json_response(
             model=GEMINI_CHAT_MODEL,
             system_instruction=GROUNDED_STEP_EVALUATION_SYSTEM_INSTRUCTION,
@@ -1079,9 +1083,10 @@ def evaluate_ocr_steps_with_rag(
                 ],
             },
         )
-        print(
-            "[testing_engine.evaluate_ocr_steps_with_rag] "
-            f"Step {step_id} model call finished in {__import__('time').monotonic() - model_start:.2f}s"
+        logger.info(
+            "Step %s model call completed in %.2fs",
+            step_id,
+            time.monotonic() - model_start,
         )
 
         step_result = _align_step_result(step_result)
@@ -1105,12 +1110,13 @@ def evaluate_ocr_steps_with_rag(
         )
 
         step_results.append(step_result)
-        print(
-            "[testing_engine.evaluate_ocr_steps_with_rag] "
-            f"Step {step_id} completed in {__import__('time').monotonic() - step_start:.2f}s"
+        logger.info(
+            "Step %s completed in %.2fs",
+            step_id,
+            time.monotonic() - step_start,
         )
 
-    print("[testing_engine.evaluate_ocr_steps_with_rag] Evaluation finished")
+    logger.info("RAG-backed OCR evaluation completed")
     return {
         "response": step_results,
         "response_source": "rag",

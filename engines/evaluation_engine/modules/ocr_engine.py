@@ -1,5 +1,6 @@
 import base64
 import json
+import logging
 import mimetypes
 import os
 import re
@@ -13,6 +14,7 @@ from ..system_instruction import OCR_SYSTEM_INSTRUCTION, OCR_USER_PROMPT
 
 OPENAI_OCR_MODEL = os.getenv("OPENAI_OCR_MODEL", "gpt-4.1-mini")
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0"))
+logger = logging.getLogger(__name__)
 
 
 def _strip_text_wrappers(text: str) -> str:
@@ -65,7 +67,8 @@ def _build_image_input(source: str) -> dict[str, Any]:
     }
 
 
-def get_json_ocr(source: str):
+def extract_ocr_steps(source: str) -> list[dict[str, Any]]:
+    """Extract line-preserving OCR steps from an image source."""
     client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
     response = client.responses.create(
@@ -125,8 +128,12 @@ def get_json_ocr(source: str):
         steps = parsed_output.get("steps", [])
         if isinstance(steps, list):
             cleaned_steps = _clean_ocr_steps(steps)
-            print(f"[ocr_engine.get_json_ocr] OCR completed with {len(cleaned_steps)} steps")
+            logger.info("OCR completed with %s steps", len(cleaned_steps))
             return cleaned_steps
 
-    print("[ocr_engine.get_json_ocr] OCR returned no valid steps")
+    logger.warning("OCR returned no valid steps")
     return []
+
+
+# Backward-compatible alias for existing integrations.
+get_json_ocr = extract_ocr_steps

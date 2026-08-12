@@ -13,8 +13,8 @@ def load_environment() -> None:
 def create_app(url_prefix: str = "") -> Flask:
     load_environment()
 
-    from .routes import api_routes
+    from .routes import api_blueprint
 
     app = Flask(__name__)
-    app.register_blueprint(api_routes, url_prefix=url_prefix or "")
+    app.register_blueprint(api_blueprint, url_prefix=url_prefix or "")
     return app

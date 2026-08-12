@@ -4,7 +4,7 @@ from os import environ
 environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 environ.setdefault("GEMINI_API_KEY", "test-gemini-key")
 
-from exp_04_context_and_step_itr2.modules.testing_engine import (
+from evaluation_engine.modules.testing_engine import (
     _build_block_results,
     _build_blocks_from_steps,
     _build_public_response,
@@ -13,7 +13,7 @@ from exp_04_context_and_step_itr2.modules.testing_engine import (
     _extract_question_parts,
     _pick_block_understanding,
 )
-from exp_04_context_and_step_itr2.modules.provider_engine import (
+from evaluation_engine.modules.provider_engine import (
     _apply_deterministic_step_checks,
 )
 
