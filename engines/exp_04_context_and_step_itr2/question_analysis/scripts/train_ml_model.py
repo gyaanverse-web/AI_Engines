@@ -1,12 +1,16 @@
 import sys
 from pathlib import Path
 
-ROOT_DIR = Path(__file__).resolve().parents[2]
+ROOT_DIR = Path(__file__).resolve().parents[3]
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-from analysis_engine.ml_training import train_model_from_dataset
-from analysis_engine.synthetic_dataset import write_synthetic_dataset
+from exp_04_context_and_step_itr2.question_analysis.ml_training import (
+    train_model_from_dataset,
+)
+from exp_04_context_and_step_itr2.question_analysis.synthetic_dataset import (
+    write_synthetic_dataset,
+)
 
 
 if __name__ == "__main__":

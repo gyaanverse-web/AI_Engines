@@ -1,6 +1,0 @@
-Flask
-google-genai
-httpx
-python-dotenv
-qdrant-client
-

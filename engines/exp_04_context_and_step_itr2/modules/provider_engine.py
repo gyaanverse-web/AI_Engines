@@ -9,17 +9,29 @@ from openai import OpenAI
 from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
+from ..system_instruction import (
+    DIRECT_STEP_EVALUATION_SYSTEM_INSTRUCTION,
+    DOCUMENT_RAG_SYSTEM_INSTRUCTION,
+    GROUNDED_STEP_EVALUATION_SYSTEM_INSTRUCTION,
+    NUMERIC_VERIFICATION_SYSTEM_INSTRUCTION,
+    build_direct_step_evaluation_prompt,
+    build_document_rag_prompt,
+    build_grounded_step_evaluation_prompt,
+    build_numeric_verification_prompt,
+)
 
-OPENAI_CHAT_MODEL = os.getenv("OPENAI_CHAT_MODEL", "gpt-5.4")
+
+GEMINI_CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-2.5-flash")
 OPENAI_EMBEDDING_MODEL = os.getenv(
     "OPENAI_EMBEDDING_MODEL",
     "text-embedding-3-large",
 )
-OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0"))
-OPENAI_REASONING_EFFORT = os.getenv("OPENAI_REASONING_EFFORT", "high")
-OPENAI_TEXT_VERBOSITY = os.getenv("OPENAI_TEXT_VERBOSITY", "low")
-OPENAI_DIRECT_REASONING_EFFORT = os.getenv("OPENAI_DIRECT_REASONING_EFFORT", "low")
-QDRANT_COLLECTION_NAME = os.getenv("QDRANT_COLLECTION_NAME", "")
+GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0"))
+RAG_MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "0.35"))
+QDRANT_COLLECTION_NAME = os.getenv(
+    "QDRANT_COLLECTION_NAME_EXP_04",
+    os.getenv("QDRANT_COLLECTION_NAME", "exp_04_context_and_step_itr2"),
+)
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
 EMBEDDING_VECTOR_SIZE = int(os.getenv("EMBEDDING_VECTOR_SIZE", "3072"))
@@ -42,6 +54,80 @@ qdrant_client = QdrantClient(
     api_key=QDRANT_API_KEY,
     timeout=QDRANT_TIMEOUT,
 )
+
+
+def _get_gemini_sdk():
+    try:
+        from google import genai
+        from google.genai import types
+    except ImportError as exc:
+        raise ImportError(
+            "Gemini SDK not installed. Install dependencies from "
+            "engines/exp_04_context_and_step_itr2/requirements.txt"
+        ) from exc
+
+    return genai, types
+
+
+def _extract_response_text(response: Any) -> str:
+    text = getattr(response, "text", None)
+    if text:
+        return text
+
+    candidates = getattr(response, "candidates", None) or []
+    for candidate in candidates:
+        content = getattr(candidate, "content", None)
+        parts = getattr(content, "parts", None) or []
+        collected = []
+        for part in parts:
+            part_text = getattr(part, "text", None)
+            if part_text:
+                collected.append(part_text)
+        if collected:
+            return "".join(collected)
+
+    return ""
+
+
+def _generate_json_response(
+    *,
+    model: str,
+    system_instruction: str,
+    user_content: Any,
+    schema: dict[str, Any],
+) -> dict[str, Any]:
+    genai, types = _get_gemini_sdk()
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    response = client.models.generate_content(
+        model=model,
+        contents=user_content,
+        config=types.GenerateContentConfig(
+            temperature=GEMINI_TEMPERATURE,
+            system_instruction=system_instruction,
+            response_mime_type="application/json",
+            response_schema=schema,
+        ),
+    )
+    return json.loads(_extract_response_text(response) or "{}")
+
+
+def _generate_text_response(
+    *,
+    model: str,
+    system_instruction: str,
+    user_content: Any,
+) -> str:
+    genai, types = _get_gemini_sdk()
+    client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+    response = client.models.generate_content(
+        model=model,
+        contents=user_content,
+        config=types.GenerateContentConfig(
+            temperature=GEMINI_TEMPERATURE,
+            system_instruction=system_instruction,
+        ),
+    )
+    return _extract_response_text(response)
 
 
 def _normalize_whitespace(text: str) -> str:
@@ -132,7 +218,11 @@ def _extract_equation(text: str) -> tuple[str, str] | None:
         return None
     left, right = text.split("=", 1)
     left = left.strip()
-    right = right.strip().rstrip(")")
+    # Keep balanced parentheses in expressions such as 2(11x + 5).  Only
+    # discard punctuation or unmatched OCR closing parentheses at the end.
+    right = re.split(r"[.!?;\n]\s*(?=[A-Za-z]|$)", right, maxsplit=1)[0].strip()
+    while right.endswith(")") and right.count(")") > right.count("("):
+        right = right[:-1].rstrip()
     if not left or not right:
         return None
     return left, right
@@ -360,19 +450,22 @@ def _apply_deterministic_step_checks(
                 if expected_unit and not reported_unit:
                     step_result["step_status"] = "incomplete"
                     step_result["description"] = (
-                        f"Missing: the unit {expected_unit} is not written; Correct step: write \\therefore {variable} = {_format_number(expected_value, reported_decimals)}\\ \\mathrm{{{expected_unit}}}"
+                        f"Missing: the unit {expected_unit} is not written; Correct step: write \\therefore {variable} = {_format_number(expected_value)}\\ \\mathrm{{{expected_unit}}}"
                     )
                 elif expected_unit and reported_unit and reported_unit != expected_unit:
                     step_result["step_status"] = "wrong"
                     step_result["description"] = (
-                        f"Error: the numerical value is correct, but the unit {reported_unit} is incorrect; Correct step: write \\therefore {variable} = {_format_number(expected_value, reported_decimals)}\\ \\mathrm{{{expected_unit}}}"
+                        f"Error: the numerical value is correct, but the unit {reported_unit} is incorrect; Correct step: write \\therefore {variable} = {_format_number(expected_value)}\\ \\mathrm{{{expected_unit}}}"
                     )
                 else:
                     step_result["step_status"] = "right"
                     step_result["description"] = ""
             else:
                 step_result["step_status"] = "wrong"
-                correction = _format_number(expected_value, reported_decimals)
+                # Never round the correct answer to the student's precision.  For
+                # example, a wrong `x = -1` must not turn the correct `x = -0.8`
+                # into another `x = -1` in the feedback.
+                correction = _format_number(expected_value)
                 if expected_unit:
                     step_result["description"] = (
                         f"Error: the final calculation gives the wrong value for {variable}; Correct step: write \\therefore {variable} = {correction}\\ \\mathrm{{{expected_unit}}}"
@@ -476,57 +569,26 @@ def _verify_numeric_step(
     step_text: str,
     local_context: str,
 ) -> dict[str, Any]:
-    response = openai_client.responses.create(
-        model=OPENAI_CHAT_MODEL,
-        # Previous config for rollback:
-        # temperature=OPENAI_TEMPERATURE,
-        reasoning={"effort": OPENAI_REASONING_EFFORT},
-        input=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a strict JSON-only numeric verifier for math and science steps. "
-                    "Verify the numeric correctness of the step using the question and nearby steps. "
-                    "Check the numerical value separately from the unit. "
-                    "If the number is correct but the unit is missing, step_status must be incomplete. "
-                    "If the number is wrong, step_status must be wrong. "
-                    "If the number and unit are both correct, step_status must be right. "
-                    "Return a short description that clearly names the issue, such as missing unit or calculation error."
-                ),
-            },
-            {
-                "role": "user",
-                "content": (
-                    f"original_question: {_normalize_latex_text(question or 'Not provided')}\n"
-                    f"step_text: {step_text}\n\n"
-                    f"nearby_steps:\n{local_context or 'Not provided'}\n\n"
-                    "Return only valid JSON matching the schema."
-                ),
-            },
-        ],
-        text={
-            "verbosity": OPENAI_TEXT_VERBOSITY,
-            "format": {
-                "type": "json_schema",
-                "name": "numeric_step_verification",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "step_status": {
-                            "type": "string",
-                            "enum": ["right", "wrong", "unknown", "incomplete"],
-                        },
-                        "description": {"type": "string"},
-                    },
-                    "required": ["step_status", "description"],
+    verification = _generate_json_response(
+        model=GEMINI_CHAT_MODEL,
+        system_instruction=NUMERIC_VERIFICATION_SYSTEM_INSTRUCTION,
+        user_content=build_numeric_verification_prompt(
+            question=_normalize_latex_text(question or "Not provided"),
+            step_text=step_text,
+            local_context=local_context,
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                "step_status": {
+                    "type": "string",
+                    "enum": ["right", "wrong", "unknown", "incomplete"],
                 },
-            }
+                "description": {"type": "string"},
+            },
+            "required": ["step_status", "description"],
         },
     )
-
-    verification = json.loads(response.output_text)
     step_result["step_status"] = verification["step_status"]
     step_result["description"] = verification["description"]
     return _align_step_result(step_result)
@@ -608,21 +670,7 @@ def _coerce_step_results(
 
 def create_qdrant_collection(collection_name: str = QDRANT_COLLECTION_NAME):
     if qdrant_client.collection_exists(collection_name=collection_name):
-        collection_info = qdrant_client.get_collection(collection_name=collection_name)
-        vectors_config = collection_info.config.params.vectors
-
-        if isinstance(vectors_config, dict):
-            if len(vectors_config) != 1:
-                qdrant_client.delete_collection(collection_name=collection_name)
-            else:
-                vector_name, vector_params = next(iter(vectors_config.items()))
-                if vector_params.size == EMBEDDING_VECTOR_SIZE:
-                    return collection_name, vector_name
-                qdrant_client.delete_collection(collection_name=collection_name)
-        else:
-            if vectors_config.size == EMBEDDING_VECTOR_SIZE:
-                return collection_name, None
-            qdrant_client.delete_collection(collection_name=collection_name)
+        return collection_name
 
     qdrant_client.create_collection(
         collection_name=collection_name,
@@ -631,7 +679,7 @@ def create_qdrant_collection(collection_name: str = QDRANT_COLLECTION_NAME):
             distance=Distance.COSINE,
         ),
     )
-    return collection_name, None
+    return collection_name
 
 
 def chunk_document_text(text: str, chunk_size: int = 1500, overlap: int = 200):
@@ -678,7 +726,7 @@ def index_documents(
     documents: list[dict[str, Any]],
     collection_name: str = QDRANT_COLLECTION_NAME,
 ):
-    collection_name, vector_name = create_qdrant_collection(collection_name)
+    create_qdrant_collection(collection_name)
 
     chunk_records = []
     for document in documents:
@@ -700,13 +748,10 @@ def index_documents(
     if chunk_records:
         embeddings = get_embeddings([record["text"] for record in chunk_records])
         for record, embedding in zip(chunk_records, embeddings):
-            vector_payload = (
-                {vector_name: embedding} if vector_name else embedding
-            )
             points.append(
                 PointStruct(
                     id=str(uuid.uuid4()),
-                    vector=vector_payload,
+                    vector=embedding,
                     payload=record,
                 )
             )
@@ -763,12 +808,10 @@ def retrieve_relevant_chunks(
     collection_name: str = QDRANT_COLLECTION_NAME,
     top_k: int = 5,
 ):
-    collection_name, vector_name = create_qdrant_collection(collection_name)
     query_vector = get_embedding(query)
     search_result = qdrant_client.query_points(
         collection_name=collection_name,
         query=query_vector,
-        using=vector_name,
         limit=top_k,
         with_payload=True,
     )
@@ -783,6 +826,32 @@ def retrieve_relevant_chunks(
         }
         for point in search_result.points
     ]
+
+
+def _is_grounded_context(relevant_chunks: list[dict[str, Any]]) -> bool:
+    if not relevant_chunks:
+        return False
+
+    return any(
+        isinstance(chunk.get("score"), (int, float)) and chunk["score"] >= RAG_MIN_SCORE
+        for chunk in relevant_chunks
+    )
+
+
+def _fallback_to_llm(
+    ocr_data: list[dict[str, Any]],
+    question: str,
+    reason: str,
+):
+    fallback_result = evaluate_ocr_steps(
+        ocr_data=ocr_data,
+        question=question,
+    )
+    return {
+        "response": fallback_result.get("response", []),
+        "response_source": "llm",
+        "fallback_reason": reason,
+    }
 
 
 def generate_document_answer(
@@ -801,31 +870,16 @@ def generate_document_answer(
         for chunk in relevant_chunks
     )
 
-    response = openai_client.responses.create(
-        model=OPENAI_CHAT_MODEL,
-        # Previous config for rollback:
-        # temperature=OPENAI_TEMPERATURE,
-        reasoning={"effort": OPENAI_REASONING_EFFORT},
-        text={"verbosity": OPENAI_TEXT_VERBOSITY},
-        input=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a document-based RAG assistant. Answer only from the "
-                    "provided context. If the context does not contain the answer, "
-                    "say that the document does not have enough information."
-                ),
-            },
-            {
-                "role": "user",
-                "content": f"Question: {question}\n\nContext:\n{context}",
-            },
-        ],
-    )
-
     return {
         "question": question,
-        "answer": response.output_text,
+        "answer": _generate_text_response(
+            model=GEMINI_CHAT_MODEL,
+            system_instruction=DOCUMENT_RAG_SYSTEM_INSTRUCTION,
+            user_content=build_document_rag_prompt(
+                question=question,
+                context=context,
+            ),
+        ),
         "sources": relevant_chunks,
     }
 
@@ -844,253 +898,20 @@ def evaluate_ocr_steps(
         return {"response": []}
 
     question = _normalize_latex_text(question.strip())
-    response = openai_client.responses.create(
-        model=OPENAI_CHAT_MODEL,
-        reasoning={"effort": OPENAI_DIRECT_REASONING_EFFORT},
-        input=[
-            {
-                "role": "system",
-                "content": (
-                    "You are a strict JSON-only evaluator for step-by-step student solutions. "
-                    "You will receive a question and an ocr_data array. "
-                    "Evaluate every step in one pass using only the given question and the provided steps. "
-                    "Return only valid JSON with a top-level key 'response'. "
-                    "Each response item must keep the same stepId and text for its step. "
-                    "step_status must be exactly one of: right, wrong, unknown, incomplete. "
-                    "topic must be a short academic topic. "
-                    "step_understanding must be one concise line about the student's intent. "
-                    "step_weight must be between 0 and 1. "
-                    "For wrong steps, description must follow: "
-                    "'Error: <exact issue>; Correct step: <correction>'. "
-                    "For incomplete steps, description must follow: "
-                    "'Missing: <missing part>; Correct step: <what should be added>'. "
-                    "For right steps, keep description empty. "
-                    "Never add extra fields. Never return markdown."
-                ),
-            },
-            {
-                "role": "user",
-                "content": json.dumps(
-                    {
-                        "question": question or "Not provided",
-                        "ocr_data": normalized_steps,
-                    },
-                    ensure_ascii=True,
-                ),
-            },
-        ],
-        text={
-            "verbosity": OPENAI_TEXT_VERBOSITY,
-            "format": {
-                "type": "json_schema",
-                "name": "bulk_step_evaluation",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "properties": {
-                        "response": {
-                            "type": "array",
-                            "items": {
-                                "type": "object",
-                                "additionalProperties": False,
-                                "properties": {
-                                    "stepId": {"type": "string"},
-                                    "text": {"type": "string"},
-                                    "step_status": {
-                                        "type": "string",
-                                        "enum": ["right", "wrong", "unknown", "incomplete"],
-                                    },
-                                    "step_weight": {
-                                        "type": "number",
-                                        "minimum": 0,
-                                        "maximum": 1,
-                                    },
-                                    "topic": {"type": "string"},
-                                    "step_understanding": {"type": "string"},
-                                    "description": {"type": "string"},
-                                },
-                                "required": [
-                                    "stepId",
-                                    "text",
-                                    "step_status",
-                                    "step_weight",
-                                    "topic",
-                                    "step_understanding",
-                                    "description",
-                                ],
-                            },
-                        }
-                    },
-                    "required": ["response"],
-                },
-            }
-        },
-    )
-
-    parsed_response = json.loads(response.output_text)
-    raw_results = parsed_response.get("response", []) if isinstance(parsed_response, dict) else []
-    final_results = _coerce_step_results(normalized_steps, raw_results, question)
-    print("[testing_engine.evaluate_ocr_steps] Evaluation finished")
-    return {"response": final_results}
-
-
-def evaluate_ocr_steps_with_rag(
-    ocr_data: list[dict[str, Any]],
-    question: str = "",
-    collection_name: str = QDRANT_COLLECTION_NAME,
-    top_k: int = 5,
-):
-    print(
-        "[testing_engine.evaluate_ocr_steps_with_rag] "
-        f"Called with {len(ocr_data)} OCR steps"
-    )
-    step_results = []
-    question = _normalize_latex_text(question.strip())
-
-    for index, step in enumerate(ocr_data):
-        step_start = __import__("time").monotonic()
-        step_id = step.get("stepId", str(uuid.uuid4()))
-        step_text = _normalize_latex_text(step.get("text", "").strip())
-
-        if not step_text:
-            continue
-
-        print(
-            "[testing_engine.evaluate_ocr_steps_with_rag] "
-            f"Processing step {index + 1}/{len(ocr_data)} (stepId={step_id})"
-        )
-
-        local_context = _build_local_step_context(ocr_data, index)
-        retrieval_query = (
-            f"Question: {question}\nStep: {step_text}\nNearby steps:\n{local_context}"
-            if question
-            else f"Step: {step_text}\nNearby steps:\n{local_context}"
-        )
-        retrieval_start = __import__("time").monotonic()
-        relevant_chunks = retrieve_relevant_chunks(
-            query=retrieval_query,
-            collection_name=collection_name,
-            top_k=top_k,
-        )
-        print(
-            "[testing_engine.evaluate_ocr_steps_with_rag] "
-            f"Step {step_id} retrieval returned {len(relevant_chunks)} chunks in "
-            f"{__import__('time').monotonic() - retrieval_start:.2f}s"
-        )
-        context = "\n\n".join(chunk["text"] for chunk in relevant_chunks)
-
-        model_start = __import__("time").monotonic()
-        response = openai_client.responses.create(
-            model=OPENAI_CHAT_MODEL,
-            # Previous config for rollback:
-            # temperature=OPENAI_TEMPERATURE,
-            reasoning={"effort": OPENAI_REASONING_EFFORT},
-            input=[
-                {
-                    "role": "system",
-"content": (
-    "You are a strict JSON-only evaluator for step-by-step student solutions. "
-    
-    "INPUT FORMAT: "
-    "You will receive a JSON object containing a 'question' and an 'ocr_data' array. "
-    "Each item in 'ocr_data' represents one step of the student's solution. "
-    
-    "TASK: "
-    "Evaluate EACH step but use the question and nearby steps to understand intent and flow. "
-    "Return output in EXACT same JSON schema as required, without changing any field names. "
-    
-    "KNOWLEDGE USAGE: "
-    "Use the question as the primary source of truth. "
-    "Use provided context (if any) as supporting knowledge. "
-    "Do not rely on external knowledge if it conflicts with the question. "
-    
-    "INTERPRETATION RULES: "
-    "The OCR text is normalized into LaTeX-friendly notation. "
-    "Always interpret expressions mathematically (not as plain text). "
-    "Use  steps to understand continuity (substitution, simplification, progression). "
-    
-    "VALIDATION RULES: "
-    "Check step intent, logical flow, topic, and whether the step appears mathematically meaningful. "
-    "You may comment on likely formula, substitution, arithmetic, sign, or logic issues, but you are not the final authority for numeric or unit correctness. "
-    
-    "FORMULA CHECK: "
-    "Flag obvious formula misuse when directly visible in the current step. "
-    
-    "NUMERIC AND UNIT CHECK: "
-    "A deterministic validation layer will make the final numeric and unit decision. "
-    "Do not overrule a mathematically plausible step just because the final numeric answer is not fully shown. "
-    
-    "STEP CLASSIFICATION: "
-    "step_status must be exactly one of: right, wrong, unknown, incomplete. "
-    
-    "Use right → correct step that advances solution. "
-    "Use wrong → incorrect formula, substitution, sign, or clear logic error. "
-    "Use incomplete → partial step, setup, missing unit, or unfinished calculation. "
-    "Use unknown → OCR or context too unclear to judge. "
-    
-    "Never mark headings, given statements, or intent lines as wrong. "
-    
-    "WEIGHT ASSIGNMENT: "
-    "step_weight must be between 0 and 1. "
-    "Use low weight (0.05–0.2) for setup steps. "
-    "Use high weight (0.8–1.0) for core solving steps. "
-    
-    "FIELDS REQUIREMENT: "
-    "topic → academic topic (e.g., Kinematics, Algebra). "
-    "step_understanding → one concise line explaining student intent. "
-    
-    "DESCRIPTION RULES (VERY STRICT): "
-    "description for wrong steps should be detailed enough to explain the exact mistake and the fix in one or two concise sentences. "
-    "It MUST match step_status exactly and never contradict it. "
-    
-    "If step_status is right → keep description minimal. "
-    
-    "If step_status is wrong → "
-    "format EXACTLY as: "
-    "'Error: <exact issue>; Correct step: <correction>' "
-    "State what part is wrong, such as formula, substitution, sign, arithmetic, or unit, and give the corrected step explicitly. "
-    
-    "If step_status is incomplete → "
-    "format EXACTLY as: "
-    "'Missing: <missing part>; Correct step: <what should be added>' "
-    "State clearly why the step is incomplete and what is missing. "
-    
-    "If step_status is unknown → clearly state what is unclear. "
-    
-    "IMPORTANT: "
-    "Do NOT give long explanations. "
-    "Do NOT repeat reasoning. "
-    "Do NOT use vague phrases like 'incorrect step'. "
-    "Be precise and technical. "
-    
-    "OUTPUT FORMAT: "
-    "Return ONLY valid JSON. "
-    "Do NOT change schema. "
-    "Do NOT add extra fields. "
-),
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"original_question: {question or 'Not provided'}\n"
-                        f"stepId: {step_id}\n"
-                        f"text: {step_text}\n\n"
-                        f"nearby_steps:\n{local_context or 'Not provided'}\n\n"
-                        f"Context:\n{context}\n\n"
-                        "Return only valid JSON matching the schema."
-                    ),
-                },
-            ],
-            text={
-                "verbosity": OPENAI_TEXT_VERBOSITY,
-                "format": {
-                    "type": "json_schema",
-                    "name": "step_rag_evaluation",
-                    "strict": True,
-                    "schema": {
+    parsed_response = _generate_json_response(
+        model=GEMINI_CHAT_MODEL,
+        system_instruction=DIRECT_STEP_EVALUATION_SYSTEM_INSTRUCTION,
+        user_content=build_direct_step_evaluation_prompt(
+            question=question,
+            ocr_data=normalized_steps,
+        ),
+        schema={
+            "type": "object",
+            "properties": {
+                "response": {
+                    "type": "array",
+                    "items": {
                         "type": "object",
-                        "additionalProperties": False,
                         "properties": {
                             "stepId": {"type": "string"},
                             "text": {"type": "string"},
@@ -1119,13 +940,151 @@ def evaluate_ocr_steps_with_rag(
                     },
                 }
             },
+            "required": ["response"],
+        },
+    )
+    raw_results = parsed_response.get("response", []) if isinstance(parsed_response, dict) else []
+    final_results = _coerce_step_results(normalized_steps, raw_results, question)
+    print("[testing_engine.evaluate_ocr_steps] Evaluation finished")
+    return {"response": final_results}
+
+
+def evaluate_ocr_steps_with_rag(
+    ocr_data: list[dict[str, Any]],
+    question: str = "",
+    collection_name: str = QDRANT_COLLECTION_NAME,
+    top_k: int = 5,
+):
+    print(
+        "[testing_engine.evaluate_ocr_steps_with_rag] "
+        f"Called with {len(ocr_data)} OCR steps"
+    )
+    normalized_steps = _normalize_ocr_steps(ocr_data)
+    if not normalized_steps:
+        return {
+            "response": [],
+            "response_source": "rag",
+            "fallback_reason": None,
+        }
+
+    step_results = []
+    question = _normalize_latex_text(question.strip())
+    grounded_contexts: dict[str, str] = {}
+    retrieval_issue = None
+
+    for index, step in enumerate(normalized_steps):
+        step_id = step.get("stepId", str(uuid.uuid4()))
+        step_text = _normalize_latex_text(step.get("text", "").strip())
+
+        if not step_text:
+            continue
+
+        local_context = _build_local_step_context(normalized_steps, index)
+        retrieval_query = (
+            f"Question: {question}\nStep: {step_text}\nNearby steps:\n{local_context}"
+            if question
+            else f"Step: {step_text}\nNearby steps:\n{local_context}"
+        )
+        retrieval_start = __import__("time").monotonic()
+
+        try:
+            relevant_chunks = retrieve_relevant_chunks(
+                query=retrieval_query,
+                collection_name=collection_name,
+                top_k=top_k,
+            )
+        except Exception as exc:
+            retrieval_issue = f"retrieval_error: {exc}"
+            print(
+                "[testing_engine.evaluate_ocr_steps_with_rag] "
+                f"Step {step_id} retrieval failed: {exc}"
+            )
+            break
+
+        print(
+            "[testing_engine.evaluate_ocr_steps_with_rag] "
+            f"Step {step_id} retrieval returned {len(relevant_chunks)} chunks in "
+            f"{__import__('time').monotonic() - retrieval_start:.2f}s"
+        )
+        if not _is_grounded_context(relevant_chunks):
+            retrieval_issue = "context_issue"
+            print(
+                "[testing_engine.evaluate_ocr_steps_with_rag] "
+                f"Step {step_id} did not meet grounding threshold {RAG_MIN_SCORE:.2f}"
+            )
+            break
+
+        grounded_contexts[step_id] = "\n\n".join(chunk["text"] for chunk in relevant_chunks)
+
+    if retrieval_issue:
+        return _fallback_to_llm(
+            ocr_data=normalized_steps,
+            question=question,
+            reason=retrieval_issue,
+        )
+
+    for index, step in enumerate(normalized_steps):
+        step_start = __import__("time").monotonic()
+        step_id = step.get("stepId", str(uuid.uuid4()))
+        step_text = _normalize_latex_text(step.get("text", "").strip())
+
+        if not step_text:
+            continue
+
+        print(
+            "[testing_engine.evaluate_ocr_steps_with_rag] "
+            f"Processing step {index + 1}/{len(ocr_data)} (stepId={step_id})"
+        )
+
+        local_context = _build_local_step_context(normalized_steps, index)
+        context = grounded_contexts.get(step_id, "")
+
+        model_start = __import__("time").monotonic()
+        step_result = _generate_json_response(
+            model=GEMINI_CHAT_MODEL,
+            system_instruction=GROUNDED_STEP_EVALUATION_SYSTEM_INSTRUCTION,
+            user_content=build_grounded_step_evaluation_prompt(
+                question=question,
+                step_id=step_id,
+                step_text=step_text,
+                local_context=local_context,
+                retrieved_context=context,
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "stepId": {"type": "string"},
+                    "text": {"type": "string"},
+                    "step_status": {
+                        "type": "string",
+                        "enum": ["right", "wrong", "unknown", "incomplete"],
+                    },
+                    "step_weight": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1,
+                    },
+                    "topic": {"type": "string"},
+                    "step_understanding": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+                "required": [
+                    "stepId",
+                    "text",
+                    "step_status",
+                    "step_weight",
+                    "topic",
+                    "step_understanding",
+                    "description",
+                ],
+            },
         )
         print(
             "[testing_engine.evaluate_ocr_steps_with_rag] "
             f"Step {step_id} model call finished in {__import__('time').monotonic() - model_start:.2f}s"
         )
 
-        step_result = _align_step_result(json.loads(response.output_text))
+        step_result = _align_step_result(step_result)
         step_result = _apply_rule_override(step_result, _step_type_check(step_text))
         step_result = _apply_rule_override(
             step_result,
@@ -1152,4 +1111,8 @@ def evaluate_ocr_steps_with_rag(
         )
 
     print("[testing_engine.evaluate_ocr_steps_with_rag] Evaluation finished")
-    return {"response": step_results}
+    return {
+        "response": step_results,
+        "response_source": "rag",
+        "fallback_reason": None,
+    }

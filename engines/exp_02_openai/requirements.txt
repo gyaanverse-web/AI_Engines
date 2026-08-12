@@ -1,5 +1,0 @@
-Flask
-openai
-python-dotenv
-qdrant-client
-

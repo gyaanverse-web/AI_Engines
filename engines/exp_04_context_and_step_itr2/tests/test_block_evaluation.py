@@ -8,11 +8,54 @@ from exp_04_context_and_step_itr2.modules.testing_engine import (
     _build_block_results,
     _build_blocks_from_steps,
     _build_public_response,
+    _coerce_description,
+    _coerce_step_understanding,
     _extract_question_parts,
+    _pick_block_understanding,
+)
+from exp_04_context_and_step_itr2.modules.provider_engine import (
+    _apply_deterministic_step_checks,
 )
 
 
 class BlockEvaluationTestCase(unittest.TestCase):
+    def test_wrong_integer_answer_does_not_round_fractional_correction(self):
+        result = _apply_deterministic_step_checks(
+            step_result={"step_status": "wrong", "description": ""},
+            question="7x - 2 = 2(11x+5). Find the value of x.",
+            step_text=r"\therefore x = -1",
+            local_context="1: 7x - 2 = 2(11x+5)",
+        )
+
+        self.assertEqual(result["step_status"], "wrong")
+        self.assertIn(r"x = -0.8", result["description"])
+        self.assertNotIn(r"x = -1", result["description"])
+
+    def test_description_keeps_complete_correction(self):
+        description = (
+            "Error: Incorrect calculation of the equation; Correct step: "
+            "7x - 22x = 10 + 2, which leads to -15x = 12 and therefore x = -4/5"
+        )
+
+        result = _coerce_description("wrong", description, "calculation_based")
+
+        self.assertEqual(result, description)
+        self.assertFalse(result.endswith("..."))
+
+    def test_block_understanding_keeps_complete_sentence(self):
+        understanding = (
+            "The student correctly identified the equation to be solved and expanded "
+            "the right side before attempting to isolate the variable."
+        )
+
+        finalized_understanding = _coerce_step_understanding(understanding)
+        result = _pick_block_understanding(
+            [{"step_understanding": finalized_understanding}]
+        )
+
+        self.assertEqual(result, understanding)
+        self.assertFalse(result.endswith("..."))
+
     def test_extract_question_parts_splits_labeled_subquestions(self):
         question = (
             "Calculate: (a) the net accelerating force, "

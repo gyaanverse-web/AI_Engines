@@ -1,9 +1,9 @@
 import json
 
-from analysis_engine import analyze_question_skill_weightage_with_meta
 from flask import Blueprint, Response, jsonify, request
 
 from .modules.analysis_engine import analyzer
+from .question_analysis import analyze_question_skill_weightage_with_meta
 
 
 api_routes = Blueprint("context_and_step_itr2_routes", __name__)

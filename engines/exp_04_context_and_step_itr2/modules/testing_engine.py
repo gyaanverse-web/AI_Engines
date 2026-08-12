@@ -1,12 +1,19 @@
-import json
 import re
 from typing import Any
 
-from analysis_engine.categories import CATEGORY_KEYS
-from analysis_engine.normalizer import normalize_scores
-from analysis_engine.preprocessor import normalize_text
-from analysis_engine.scorer import calculate_rule_scores
-from exp_03_openai_ocr_gemini_test.modules.testing_engine import (
+from ..question_analysis.categories import CATEGORY_KEYS
+from ..question_analysis.normalizer import normalize_scores
+from ..question_analysis.preprocessor import normalize_text
+from ..question_analysis.scorer import calculate_rule_scores
+from ..system_instruction import (
+    RECONSTRUCT_SOLUTION_SYSTEM_INSTRUCTION,
+    SOLUTION_PROFILE_SYSTEM_INSTRUCTION,
+    STEP_EVALUATION_SYSTEM_INSTRUCTION,
+    build_reconstruct_solution_prompt,
+    build_solution_profile_prompt,
+    build_step_evaluation_prompt,
+)
+from .provider_engine import (
     GEMINI_CHAT_MODEL,
     QDRANT_COLLECTION_NAME,
     RAG_MIN_SCORE,
@@ -80,24 +87,13 @@ def _reconstruct_solution_steps(
     if not filtered_steps:
         filtered_steps = ocr_steps
 
+
     parsed_response = _generate_json_response(
         model=GEMINI_CHAT_MODEL,
-        system_instruction=(
-            "You reconstruct student solution steps from noisy OCR. "
-            "Merge split lines into logical mathematical steps. "
-            "Remove pure numbering artifacts like isolated 1, 2, 3 when they are only list markers. "
-            "Preserve the student order and mathematical meaning. "
-            "Do not solve the problem. Do not invent missing steps. "
-            "If several OCR lines belong to one step, merge them into one concise step text. "
-            "Prefer fewer, meaningful steps over fragmented lines. "
-            "Return only valid JSON."
-        ),
-        user_content=json.dumps(
-            {
-                "question": question or "Not provided",
-                "ocr_steps": filtered_steps,
-            },
-            ensure_ascii=True,
+        system_instruction=RECONSTRUCT_SOLUTION_SYSTEM_INSTRUCTION,
+        user_content=build_reconstruct_solution_prompt(
+            question=question,
+            ocr_steps=filtered_steps,
         ),
         schema={
             "type": "object",
@@ -449,28 +445,14 @@ def _build_solution_profile(
 
     parsed_response = _generate_json_response(
         model=GEMINI_CHAT_MODEL,
-        system_instruction=(
-            "You prepare context for a strict student-step evaluator. "
-            "Read the full question, the question parts if present, and the reconstructed student solution blocks. "
-            "Summarize the goal, the likely method, and the carry-forward dependencies between steps. "
-            "Identify important assumptions or part boundaries when the answer is divided into sections such as (a), (b), or (c). "
-            "Do not grade steps. Do not invent missing work. "
-            "Keep method points short and factual. Return only valid JSON."
-        ),
-        user_content=json.dumps(
-            {
-                "question": question or "Not provided",
-                "question_parts": question_parts or [],
-                "question_profile": {
-                    "primary_category": question_profile["primary_category"],
-                    "secondary_categories": question_profile["secondary_categories"],
-                    "weights": question_profile["weights"],
-                },
-                "solution_blocks": _serialize_blocks_for_prompt(steps),
-                "reconstructed_steps": steps,
-                "retrieved_context": context or "Not provided",
-            },
-            ensure_ascii=True,
+        system_instruction=SOLUTION_PROFILE_SYSTEM_INSTRUCTION,
+        user_content=build_solution_profile_prompt(
+            question=question,
+            question_parts=question_parts or [],
+            question_profile=question_profile,
+            solution_blocks=_serialize_blocks_for_prompt(steps),
+            reconstructed_steps=steps,
+            retrieved_context=context,
         ),
         schema={
             "type": "object",
@@ -537,10 +519,7 @@ def _coerce_description(status: str, description: str, step_type: str) -> str:
         if "; Correct step:" not in cleaned:
             cleaned = f"{cleaned.rstrip('. ')}; Correct step: {correction_hint}"
         missing_part, _, correction = cleaned.partition("; Correct step:")
-        return (
-            f"{_truncate_words(missing_part, 14)}; Correct step: "
-            f"{_truncate_words(correction.strip(), 12)}"
-        )
+        return f"{missing_part.strip()}; Correct step: {correction.strip()}"
 
     if not cleaned:
         cleaned = f"Error: the step is not mathematically valid; Correct step: {correction_hint}"
@@ -549,10 +528,7 @@ def _coerce_description(status: str, description: str, step_type: str) -> str:
     if "; Correct step:" not in cleaned:
         cleaned = f"{cleaned.rstrip('. ')}; Correct step: {correction_hint}"
     error_part, _, correction = cleaned.partition("; Correct step:")
-    return (
-        f"{_truncate_words(error_part, 14)}; Correct step: "
-        f"{_truncate_words(correction.strip(), 12)}"
-    )
+    return f"{error_part.strip()}; Correct step: {correction.strip()}"
 
 
 def _clamp_step_weight(value: Any) -> float:
@@ -573,6 +549,12 @@ def _coerce_topic(topic: Any, step_type: str) -> str:
     if cleaned:
         return _truncate_words(cleaned, 6)
     return step_type.replace("_based", "").replace("_", " ").title()
+
+
+def _coerce_step_understanding(value: Any) -> str:
+    return _normalize_whitespace(
+        str(value or "Step intent is not fully clear.")
+    )
 
 
 def _strip_latex_commands(text: str) -> str:
@@ -910,7 +892,7 @@ def _pick_block_understanding(block_steps: list[dict[str, Any]]) -> str:
     if not understandings:
         return "Step intent is not fully clear."
 
-    return _truncate_words(" ".join(understandings), 24)
+    return " ".join(understandings)
 
 
 def _pick_block_description(
@@ -1010,7 +992,7 @@ def _finalize_step_result(
         "step_weight": _clamp_step_weight(raw_result.get("step_weight", 0.5)),
         "step_type": step_type,
         "topic": _coerce_topic(topic, step_type),
-        "step_understanding": _truncate_words(step_understanding or "Step intent is not fully clear.", 18),
+        "step_understanding": _coerce_step_understanding(step_understanding),
         "description": _coerce_description(
             step_status,
             str(raw_result.get("description", "")).strip(),
@@ -1039,48 +1021,16 @@ def _evaluate_reconstructed_steps(
     )
     parsed_response = _generate_json_response(
         model=GEMINI_CHAT_MODEL,
-        system_instruction=(
-            "You are a strict JSON-only evaluator for step-by-step student answers. "
-            "You will receive the original question, any explicit question parts, the full reconstructed solution, "
-            "block metadata, a question-category profile, a solution-profile summary, and optional retrieved context. "
-            "Evaluate globally before labeling individual steps. "
-            "Respect block boundaries such as (a), (b), and (c) when the student answer is divided into parts. "
-            "If a later block answers a different sub-question, do not penalize it for not repeating prior steps. "
-            "Maintain continuity across the whole solution and remember prior steps. "
-            "If the student carries forward an earlier wrong value correctly without adding a new mistake, "
-            "do not mark the later step wrong again. "
-            "If a step relies on an unstated assumption, mention the missing assumption in the description. "
-            "Do not punish OCR cleanup or merged wording if the math or explanation is faithful. "
-            "Never mark headings, givens, or setup labels as wrong. "
-            "step_status must be exactly one of: right, wrong, unknown, incomplete. "
-            "step_weight must be between 0 and 1. "
-            "step_type must be exactly one category from the provided question analysis categories. "
-            "topic must be a short academic topic. "
-            "step_understanding must be one concise line about the student's intent. "
-            "For wrong steps, description must follow: "
-            "'Error: <exact issue>; Correct step: <short correction>'. "
-            "For incomplete steps, description must follow: "
-            "'Missing: <exact missing part>; Correct step: <short next step>'. "
-            "For right steps, keep description empty. "
-            "Keep wrong or incomplete descriptions short. "
-            "Return only valid JSON with no extra fields."
-        ),
-        user_content=json.dumps(
-            {
-                "question": question or "Not provided",
-                "question_parts": question_parts or [],
-                "question_profile": {
-                    "primary_category": question_profile["primary_category"],
-                    "secondary_categories": question_profile["secondary_categories"],
-                    "weights": question_profile["weights"],
-                },
-                "solution_profile": solution_profile,
-                "solution_blocks": _serialize_blocks_for_prompt(steps),
-                "reconstructed_steps": steps,
-                "retrieved_context": context or "Not provided",
-                "allowed_step_types": CATEGORY_KEYS,
-            },
-            ensure_ascii=True,
+        system_instruction=STEP_EVALUATION_SYSTEM_INSTRUCTION,
+        user_content=build_step_evaluation_prompt(
+            question=question,
+            question_parts=question_parts or [],
+            question_profile=question_profile,
+            solution_profile=solution_profile,
+            solution_blocks=_serialize_blocks_for_prompt(steps),
+            reconstructed_steps=steps,
+            retrieved_context=context,
+            allowed_step_types=CATEGORY_KEYS,
         ),
         schema={
             "type": "object",

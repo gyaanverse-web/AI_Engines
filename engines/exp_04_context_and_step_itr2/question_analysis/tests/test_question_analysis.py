@@ -3,14 +3,25 @@ from os import environ
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from analysis_engine.categories import CATEGORY_KEYS
-from analysis_engine.ml_classifier import MLClassifierService, build_ml_features
-from analysis_engine.ml_training import train_model_from_dataset
-from analysis_engine.normalizer import normalize_scores
-from analysis_engine.question_skill_weightage import analyze_question_skill_weightage
-from analysis_engine.scorer import calculate_question_skill_weightage
-from analysis_engine.synthetic_dataset import write_synthetic_dataset
-from exp_03_openai_ocr_gemini_test import create_app
+from exp_04_context_and_step_itr2 import create_app
+from exp_04_context_and_step_itr2.question_analysis.categories import CATEGORY_KEYS
+from exp_04_context_and_step_itr2.question_analysis.ml_classifier import (
+    MLClassifierService,
+    build_ml_features,
+)
+from exp_04_context_and_step_itr2.question_analysis.ml_training import (
+    train_model_from_dataset,
+)
+from exp_04_context_and_step_itr2.question_analysis.normalizer import normalize_scores
+from exp_04_context_and_step_itr2.question_analysis.question_skill_weightage import (
+    analyze_question_skill_weightage,
+)
+from exp_04_context_and_step_itr2.question_analysis.scorer import (
+    calculate_question_skill_weightage,
+)
+from exp_04_context_and_step_itr2.question_analysis.synthetic_dataset import (
+    write_synthetic_dataset,
+)
 
 
 class QuestionAnalysisTestCase(unittest.TestCase):
