@@ -1,10 +1,8 @@
-import json
 import logging
 
-from flask import Blueprint, Response, jsonify, request
+from flask import Blueprint, jsonify, request
 
 from .modules.analysis_engine import analyze_solution
-from question_analysis import analyze_question_skill_weightage_with_meta
 
 
 logger = logging.getLogger(__name__)
@@ -15,7 +13,7 @@ api_routes = api_blueprint
 
 @api_blueprint.route("/", methods=["GET"])
 def health_check_endpoint():
-    return "context and step evaluation service is running"
+    return "evaluation engine service is running"
 
 
 @api_blueprint.route("/get_json_ocr", methods=["POST"])
@@ -148,24 +146,6 @@ def index_text_documents_endpoint():
 @api_blueprint.route("/evaluated_json_ocr", methods=["POST"])
 def evaluation_status_endpoint():
     return "json_ocr evaluated successfully"
-
-
-@api_blueprint.route("/api/v1/question-analysis/analyze", methods=["POST"])
-def analyze_question_endpoint():
-    data = request.get_json(silent=True)
-
-    try:
-        result = analyze_question_skill_weightage_with_meta(data)
-        return Response(
-            response=json.dumps(result["weights"]),
-            status=200,
-            mimetype="application/json",
-            headers={"X-Question-Analysis-Mode": result["mode"]},
-        )
-    except ValueError as exc:
-        return jsonify({"error": str(exc)}), 400
-    except Exception as exc:
-        return jsonify({"error": str(exc)}), 500
 
 
 @api_blueprint.route("/get_analysis", methods=["POST"])

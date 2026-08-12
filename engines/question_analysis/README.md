@@ -9,13 +9,9 @@ It now also includes a bootstrap ML pipeline that can:
 - load the model during inference
 - blend rule score and model score
 
-## Endpoint
+## API
 
-`POST /api/v1/question-analysis/analyze`
-
-If served through the repository root app, the endpoint is exposed at:
-
-`POST /context_and_step_itr2/api/v1/question-analysis/analyze`
+See [api.md](api.md) for the endpoint, request, response, and deployment details.
 
 ## Request
 

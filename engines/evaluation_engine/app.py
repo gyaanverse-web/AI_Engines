@@ -3,7 +3,7 @@ import os
 from evaluation_engine import create_app
 
 
-app = create_app()
+app = create_app(url_prefix="/evaluation_engine")
 
 
 if __name__ == "__main__":

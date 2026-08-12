@@ -3,7 +3,7 @@ from os import environ
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from evaluation_engine import create_app
+from question_analysis.app import create_app
 from question_analysis.categories import CATEGORY_KEYS
 from question_analysis.ml_classifier import (
     MLClassifierService,
@@ -33,7 +33,7 @@ class QuestionAnalysisTestCase(unittest.TestCase):
 
     def test_validation_rejects_missing_question(self):
         response = self.client.post(
-            "/api/v1/question-analysis/analyze",
+            "/question_analysis/analyze",
             json={"chapter": "Simple Interest"},
         )
 
@@ -42,7 +42,7 @@ class QuestionAnalysisTestCase(unittest.TestCase):
 
     def test_validation_rejects_missing_chapter(self):
         response = self.client.post(
-            "/api/v1/question-analysis/analyze",
+            "/question_analysis/analyze",
             json={"question": "Calculate the answer"},
         )
 
@@ -51,7 +51,7 @@ class QuestionAnalysisTestCase(unittest.TestCase):
 
     def test_validation_rejects_non_boolean_use_ml(self):
         response = self.client.post(
-            "/api/v1/question-analysis/analyze",
+            "/question_analysis/analyze",
             json={
                 "question": "Calculate the answer",
                 "chapter": "Simple Interest",
@@ -118,7 +118,7 @@ class QuestionAnalysisTestCase(unittest.TestCase):
 
     def test_response_contains_exactly_10_category_keys(self):
         response = self.client.post(
-            "/api/v1/question-analysis/analyze",
+            "/question_analysis/analyze",
             json={
                 "question": "Calculate the simple interest on ₹5000 at 5% per annum for 2 years.",
                 "chapter": "Simple Interest",
@@ -133,7 +133,7 @@ class QuestionAnalysisTestCase(unittest.TestCase):
 
     def test_response_does_not_contain_extra_metadata_fields(self):
         response = self.client.post(
-            "/api/v1/question-analysis/analyze",
+            "/question_analysis/analyze",
             json={
                 "question": "Explain photosynthesis in detail.",
                 "chapter": "Photosynthesis",
@@ -156,7 +156,7 @@ class QuestionAnalysisTestCase(unittest.TestCase):
 
     def test_response_header_indicates_rule_only_mode(self):
         response = self.client.post(
-            "/api/v1/question-analysis/analyze",
+            "/question_analysis/analyze",
             json={
                 "question": "Explain photosynthesis in detail.",
                 "chapter": "Photosynthesis",
@@ -233,7 +233,7 @@ class QuestionAnalysisTestCase(unittest.TestCase):
 
             try:
                 response = self.client.post(
-                    "/api/v1/question-analysis/analyze",
+                    "/question_analysis/analyze",
                     json={
                         "question": "Calculate the simple interest on ₹5000 at 5% per annum for 2 years.",
                         "chapter": "Simple Interest",
@@ -268,7 +268,7 @@ class QuestionAnalysisTestCase(unittest.TestCase):
 
             try:
                 response = self.client.post(
-                    "/api/v1/question-analysis/analyze",
+                    "/question_analysis/analyze",
                     json={
                         "question": "Calculate the simple interest on ₹5000 at 5% per annum for 2 years.",
                         "chapter": "Simple Interest",
@@ -303,7 +303,7 @@ class QuestionAnalysisTestCase(unittest.TestCase):
 
             try:
                 response = self.client.post(
-                    "/api/v1/question-analysis/analyze",
+                    "/question_analysis/analyze",
                     json={
                         "question": "Calculate the simple interest on ₹5000 at 5% per annum for 2 years.",
                         "chapter": "Simple Interest",
