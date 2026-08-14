@@ -1,6 +1,10 @@
 flask>=3.0,<4
 python-dotenv>=1.0
 openai>=1.50
+# The evaluate half of the pipeline. Missing here until 2026-08-12 (it lived only
+# in exp_03's own requirements.txt), which meant OCR succeeded and every evaluate
+# call failed with "Gemini SDK not installed" — after the OCR had been paid for.
+google-genai>=1.0
 qdrant-client>=1.12
 httpx>=0.27
 gunicorn>=22.0
