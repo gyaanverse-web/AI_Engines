@@ -7,6 +7,8 @@
 		stepId: string;
 		text: string;
 		step_status: 'right' | 'wrong' | 'unknown' | 'incomplete';
+		counts_toward_score: boolean;
+		step_type: string;
 		description: string;
 		topic: string;
 		step_understanding: string;
@@ -21,7 +23,29 @@
 	};
 
 	type AnalysisApiResponse = {
-		response: AnalysisStep[];
+		schema_version: string;
+		steps: AnalysisStep[];
+		summary: {
+			overall_status: AnalysisStep['step_status'];
+			step_count: number;
+			scored_step_count: number;
+			percentage: number;
+			status_breakdown: Record<AnalysisStep['step_status'], number>;
+			full_marks?: number;
+			obtained_marks?: number;
+		};
+		grounding: {
+			status: 'used' | 'fallback' | 'not_requested';
+			collection_name: string | null;
+			reason: string | null;
+			sources: Array<{
+				rank: number;
+				score: number;
+				document_id: string | null;
+				chunk_index: number | null;
+				metadata: Record<string, unknown>;
+			}>;
+		};
 	};
 
 	const questions: QuestionItem[] = [
@@ -176,28 +200,7 @@
 		return cleaned.includes('$') ? cleaned : `$${cleaned}$`;
 	}
 
-	function getSummary(steps: AnalysisStep[]) {
-		return steps.reduce(
-			(acc, step) => {
-				acc.total += 1;
-				acc[step.step_status] += 1;
-				acc.scoreSum += step.step_status === 'right' ? 1 : step.step_status === 'incomplete' ? 0.5 : step.step_status === 'unknown' ? 0.3 : 0;
-				return acc;
-			},
-			{
-				total: 0,
-				right: 0,
-				wrong: 0,
-				incomplete: 0,
-				unknown: 0,
-				scoreSum: 0
-			}
-		);
-	}
-
-	const analysisSummary = $derived(
-		analysisData ? getSummary(analysisData.response) : null
-	);
+	const displaySteps = $derived(analysisData?.steps ?? []);
 </script>
 
 <div class="page">
@@ -272,16 +275,22 @@
 				<div class="summary">
 					<h2>Analysis Result</h2>
 					<p>
-						Score: <strong>{analysisSummary?.total ? Math.round((analysisSummary.scoreSum / analysisSummary.total) * 100) : 0}%</strong>
+						Score: <strong>{analysisData.summary.percentage}%</strong>
 					</p>
 					<p>
-						Right: {analysisSummary?.right ?? 0} | Wrong: {analysisSummary?.wrong ?? 0} | Incomplete:
-						{analysisSummary?.incomplete ?? 0} | Unknown: {analysisSummary?.unknown ?? 0}
+						Right: {analysisData.summary.status_breakdown.right} | Wrong:
+						{analysisData.summary.status_breakdown.wrong} | Incomplete:
+						{analysisData.summary.status_breakdown.incomplete} | Unknown:
+						{analysisData.summary.status_breakdown.unknown}
 					</p>
+					<p>Scored steps: {analysisData.summary.scored_step_count} / {analysisData.summary.step_count}</p>
+					{#if analysisData.grounding.status === 'fallback'}
+						<p>Reference retrieval was unavailable; evaluation used the question and student work.</p>
+					{/if}
 				</div>
 
 				<div class="report-list">
-					{#each analysisData.response as item}
+					{#each displaySteps as item}
 						<article class="report-item">
 							<div class="report-head">
 								<span class="status">{item.step_status.toUpperCase()}</span>
@@ -292,7 +301,10 @@
 							{#if item.step_understanding}
 								<p><strong>Step understanding:</strong> {item.step_understanding}</p>
 							{/if}
-							<p><strong>Weight:</strong> {item.step_weight}</p>
+							<p>
+								<strong>Scoring:</strong>
+								{item.counts_toward_score ? `Weight ${item.step_weight}` : 'Not scored'}
+							</p>
 						</article>
 					{/each}
 				</div>

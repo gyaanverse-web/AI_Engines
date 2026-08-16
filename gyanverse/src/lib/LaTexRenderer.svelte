@@ -93,7 +93,7 @@
 		display: inline;
 	}
 
-	.math-display {
+	.latex-content :global(.math-display) {
 		display: flex;
 		justify-content: center;
 		margin: 12px 0;
@@ -102,7 +102,7 @@
 		border-radius: 6px;
 	}
 
-	.math-display :global(.katex) {
+	.latex-content :global(.math-display .katex) {
 		font-size: 1.1em;
 	}
 

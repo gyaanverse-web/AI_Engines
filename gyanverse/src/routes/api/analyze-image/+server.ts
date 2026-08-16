@@ -37,7 +37,8 @@ export const POST: RequestHandler = async ({ request }) => {
 			backendPayload.collection_name = collectionName;
 		}
 
-		const backendResponse = await postJson(backendBaseUrl, '/get_analysis', backendPayload);
+		const backendPath = env.EVALUATION_ENGINE_PATH || '/evaluation_engine/get_analysis';
+		const backendResponse = await postJson(backendBaseUrl, backendPath, backendPayload);
 		console.log(`[api/analyze-image] Backend status: ${backendResponse.status}`);
 
 		if (backendResponse.status < 200 || backendResponse.status >= 300) {
@@ -91,6 +92,9 @@ function postJson(baseUrl: string, path: string, payload: unknown): Promise<{ st
 		);
 
 		request.on('error', reject);
+		request.setTimeout(120_000, () => {
+			request.destroy(new Error('Evaluation engine request timed out.'));
+		});
 		request.write(body);
 		request.end();
 	});

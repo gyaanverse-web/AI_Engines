@@ -5,13 +5,12 @@ environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 environ.setdefault("GEMINI_API_KEY", "test-gemini-key")
 
 from evaluation_engine.modules.testing_engine import (
-    _build_block_results,
     _build_blocks_from_steps,
-    _build_public_response,
+    _build_public_steps,
+    _build_summary,
     _coerce_description,
     _coerce_step_understanding,
     _extract_question_parts,
-    _pick_block_understanding,
 )
 from evaluation_engine.modules.provider_engine import (
     _apply_deterministic_step_checks,
@@ -49,12 +48,8 @@ class BlockEvaluationTestCase(unittest.TestCase):
         )
 
         finalized_understanding = _coerce_step_understanding(understanding)
-        result = _pick_block_understanding(
-            [{"step_understanding": finalized_understanding}]
-        )
-
-        self.assertEqual(result, understanding)
-        self.assertFalse(result.endswith("..."))
+        self.assertEqual(finalized_understanding, understanding)
+        self.assertFalse(finalized_understanding.endswith("..."))
 
     def test_extract_question_parts_splits_labeled_subquestions(self):
         question = (
@@ -97,7 +92,7 @@ class BlockEvaluationTestCase(unittest.TestCase):
         self.assertEqual(annotated_steps[3]["question_part_text"], "the acceleration of the train")
         self.assertEqual(annotated_steps[5]["question_part_text"], "the force of wagon 1 on wagon 2")
 
-    def test_build_block_results_calculates_marks_from_step_weights(self):
+    def test_build_summary_calculates_marks_from_step_weights(self):
         step_results = [
             {
                 "stepId": "1",
@@ -146,14 +141,13 @@ class BlockEvaluationTestCase(unittest.TestCase):
             },
         ]
 
-        blocks, summary = _build_block_results(step_results, full_marks=5)
+        summary = _build_summary(step_results, full_marks=5)
 
         self.assertEqual(summary["full_marks"], 5)
         self.assertEqual(summary["obtained_marks"], 2.75)
         self.assertEqual(summary["percentage"], 55.0)
-        self.assertEqual([block["obtained_marks"] for block in blocks], [2, 0.75, 0])
 
-    def test_build_public_response_matches_exp03_shape_with_blocks_as_steps(self):
+    def test_build_public_steps_returns_flat_shape_without_internal_block_fields(self):
         step_results = [
             {
                 "stepId": "1",
@@ -187,8 +181,7 @@ class BlockEvaluationTestCase(unittest.TestCase):
             },
         ]
 
-        blocks, summary = _build_block_results(step_results, full_marks=5)
-        response = _build_public_response(blocks, float(summary["total_weight"]))
+        response = _build_public_steps(step_results)
 
         self.assertEqual(
             list(response[0].keys()),
@@ -196,7 +189,9 @@ class BlockEvaluationTestCase(unittest.TestCase):
                 "stepId",
                 "text",
                 "step_status",
+                "counts_toward_score",
                 "step_weight",
+                "step_type",
                 "topic",
                 "step_understanding",
                 "description",
@@ -204,7 +199,10 @@ class BlockEvaluationTestCase(unittest.TestCase):
         )
         self.assertEqual(response[0]["stepId"], "1")
         self.assertEqual(response[0]["step_status"], "right")
+        self.assertTrue(response[0]["counts_toward_score"])
         self.assertEqual(response[0]["step_weight"], 0.4)
+        self.assertNotIn("blockId", response[0])
+        self.assertNotIn("sourceStepIds", response[0])
         self.assertEqual(response[1]["step_status"], "incomplete")
         self.assertEqual(response[1]["description"], "Missing: unit; Correct step: write a = 1.94 m/s^2")
 

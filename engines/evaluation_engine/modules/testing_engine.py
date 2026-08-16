@@ -17,16 +17,19 @@ from ..system_instruction import (
 from .provider_engine import (
     GEMINI_CHAT_MODEL,
     QDRANT_COLLECTION_NAME,
+    RAG_MAX_CONTEXT_CHARS,
     RAG_MIN_SCORE,
     _apply_deterministic_step_checks,
     _decimal_places,
     _extract_assigned_variable,
+    _extract_assigned_numeric_value,
     _extract_last_number,
     _extract_last_number_text,
     _format_number,
     _formula_checker,
     _generate_json_response,
     _normalize_latex_text,
+    _validate_collection_name,
     index_documents,
     index_text_documents,
     retrieve_relevant_chunks,
@@ -34,6 +37,7 @@ from .provider_engine import (
 
 
 STATUS_VALUES = {"right", "wrong", "unknown", "incomplete"}
+RESPONSE_SCHEMA_VERSION = "1.0"
 STATUS_CREDITS = {
     "right": 1.0,
     "incomplete": 0.5,
@@ -64,8 +68,19 @@ def _normalize_whitespace(text: str) -> str:
 
 def _normalize_ocr_steps(ocr_data: list[dict[str, Any]]) -> list[dict[str, str]]:
     normalized_steps = []
+    used_step_ids: set[str] = set()
     for index, step in enumerate(ocr_data, start=1):
-        step_id = str(step.get("stepId", index))
+        if not isinstance(step, dict):
+            logger.warning("Ignoring non-object OCR step at index %s", index)
+            continue
+        step_id = str(step.get("stepId", index)).strip() or str(index)
+        if step_id in used_step_ids:
+            base_step_id = step_id
+            suffix = 2
+            while f"{base_step_id}_{suffix}" in used_step_ids:
+                suffix += 1
+            step_id = f"{base_step_id}_{suffix}"
+        used_step_ids.add(step_id)
         step_text = _normalize_latex_text(str(step.get("text", "")).strip())
         if not step_text:
             continue
@@ -89,58 +104,97 @@ def _reconstruct_solution_steps(
     if not filtered_steps:
         filtered_steps = ocr_steps
 
-    parsed_response = _generate_json_response(
-        model=GEMINI_CHAT_MODEL,
-        system_instruction=RECONSTRUCT_SOLUTION_SYSTEM_INSTRUCTION,
-        user_content=build_reconstruct_solution_prompt(
-            question=question,
-            ocr_steps=filtered_steps,
-        ),
-        schema={
-            "type": "object",
-            "properties": {
-                "steps": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "stepId": {"type": "string"},
-                            "sourceStepIds": {
-                                "type": "array",
-                                "items": {"type": "string"},
+    try:
+        parsed_response = _generate_json_response(
+            model=GEMINI_CHAT_MODEL,
+            system_instruction=RECONSTRUCT_SOLUTION_SYSTEM_INSTRUCTION,
+            user_content=build_reconstruct_solution_prompt(
+                question=question,
+                ocr_steps=filtered_steps,
+            ),
+            schema={
+                "type": "object",
+                "properties": {
+                    "steps": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "stepId": {"type": "string"},
+                                "sourceStepIds": {
+                                    "type": "array",
+                                    "items": {"type": "string"},
+                                },
+                                "text": {"type": "string"},
                             },
-                            "text": {"type": "string"},
+                            "required": ["stepId", "sourceStepIds", "text"],
                         },
-                        "required": ["stepId", "sourceStepIds", "text"],
-                    },
-                }
+                    }
+                },
+                "required": ["steps"],
             },
-            "required": ["steps"],
-        },
-    )
+        )
+    except Exception as exc:
+        logger.warning("OCR reconstruction failed; preserving original steps: %s", exc)
+        parsed_response = {}
 
     reconstructed_steps = parsed_response.get("steps", []) if isinstance(parsed_response, dict) else []
-    final_steps = []
+    source_by_id = {step["stepId"]: step for step in filtered_steps}
+    source_position = {
+        step["stepId"]: index
+        for index, step in enumerate(filtered_steps)
+    }
+    used_source_ids: set[str] = set()
+    grouped_steps: list[tuple[int, dict[str, Any]]] = []
 
-    for index, step in enumerate(reconstructed_steps, start=1):
-        source_step_ids = [
-            str(step_id).strip()
-            for step_id in step.get("sourceStepIds", [])
-            if str(step_id).strip()
-        ]
-        text = _normalize_latex_text(str(step.get("text", "")).strip())
-        if not text:
+    for step in reconstructed_steps:
+        if not isinstance(step, dict) or not isinstance(step.get("sourceStepIds"), list):
             continue
-        final_steps.append(
-            {
-                "stepId": str(step.get("stepId", index)),
-                "sourceStepIds": source_step_ids or [str(step.get("stepId", index))],
-                "text": text,
-            }
+        source_step_ids = []
+        for raw_step_id in step["sourceStepIds"]:
+            source_step_id = str(raw_step_id).strip()
+            if (
+                source_step_id
+                and source_step_id in source_by_id
+                and source_step_id not in used_source_ids
+                and source_step_id not in source_step_ids
+            ):
+                source_step_ids.append(source_step_id)
+        source_step_ids.sort(key=source_position.__getitem__)
+        positions = [source_position[step_id] for step_id in source_step_ids]
+        if not positions or positions != list(range(positions[0], positions[-1] + 1)):
+            continue
+
+        # The model may decide grouping, but it must never rewrite student work.
+        # Rebuild text exclusively from the original OCR lines.
+        grouped_steps.append(
+            (
+                positions[0],
+                {
+                    "stepId": source_step_ids[0],
+                    "sourceStepIds": source_step_ids,
+                    "text": " ".join(source_by_id[step_id]["text"] for step_id in source_step_ids),
+                },
+            )
+        )
+        used_source_ids.update(source_step_ids)
+
+    for source_step in filtered_steps:
+        if source_step["stepId"] in used_source_ids:
+            continue
+        grouped_steps.append(
+            (
+                source_position[source_step["stepId"]],
+                {
+                    "stepId": source_step["stepId"],
+                    "sourceStepIds": [source_step["stepId"]],
+                    "text": source_step["text"],
+                },
+            )
         )
 
-    if final_steps:
-        return final_steps
+    if grouped_steps:
+        return [step for _, step in sorted(grouped_steps, key=lambda item: item[0])]
 
     return [
         {
@@ -197,9 +251,12 @@ def _build_blocks_from_steps(
     blocks: list[dict[str, Any]] = []
     current_block: dict[str, Any] | None = None
 
+    has_part_labels = any(_extract_part_label_from_text(step["text"]) for step in steps)
+    group_by_part = bool(question_parts or has_part_labels)
+
     for index, step in enumerate(steps, start=1):
         detected_label = _extract_part_label_from_text(step["text"])
-        if current_block is None or detected_label is not None:
+        if current_block is None or detected_label is not None or not group_by_part:
             block_id = f"block_{len(blocks) + 1}"
             current_block = {
                 "blockId": block_id,
@@ -289,7 +346,7 @@ def _get_rag_context(
     steps: list[dict[str, Any]],
     collection_name: str,
     top_k: int,
-) -> tuple[str, str | None]:
+) -> tuple[str, str | None, list[dict[str, Any]]]:
     try:
         relevant_chunks = retrieve_relevant_chunks(
             query=_build_retrieval_query(question, steps),
@@ -298,10 +355,10 @@ def _get_rag_context(
         )
     except Exception as exc:
         logger.warning("RAG retrieval failed: %s", exc)
-        return "", f"retrieval_error: {exc}"
+        return "", "retrieval_error", []
 
     if not relevant_chunks:
-        return "", "no_context"
+        return "", "no_context", []
 
     grounded_chunks = [
         chunk
@@ -309,10 +366,33 @@ def _get_rag_context(
         if isinstance(chunk.get("score"), (int, float)) and chunk["score"] >= RAG_MIN_SCORE
     ]
     if not grounded_chunks:
-        return "", "context_issue"
+        return "", "context_issue", []
 
-    context = "\n\n".join(chunk.get("text", "") for chunk in grounded_chunks if chunk.get("text"))
-    return context, None if context else "context_issue"
+    context_parts = []
+    sources = []
+    remaining_chars = max(0, RAG_MAX_CONTEXT_CHARS)
+    for rank, chunk in enumerate(grounded_chunks, start=1):
+        chunk_text = _normalize_whitespace(str(chunk.get("text", "")))
+        if not chunk_text or remaining_chars <= 0:
+            continue
+        chunk_text = chunk_text[:remaining_chars]
+        remaining_chars -= len(chunk_text)
+        context_parts.append(
+            f"[Source {rank} | document={chunk.get('document_id')} | "
+            f"chunk={chunk.get('chunk_index')} | score={float(chunk['score']):.4f}]\n{chunk_text}"
+        )
+        sources.append(
+            {
+                "rank": rank,
+                "score": round(float(chunk["score"]), 4),
+                "document_id": chunk.get("document_id"),
+                "chunk_index": chunk.get("chunk_index"),
+                "metadata": chunk.get("metadata", {}),
+            }
+        )
+
+    context = "\n\n".join(context_parts)
+    return context, None if context else "context_issue", sources
 
 
 def _pick_primary_category(
@@ -638,25 +718,52 @@ def _extract_reported_unit(text: str) -> str | None:
     return unit
 
 
+def _unit_for_quantity_text(text: str) -> set[str]:
+    lowered = (text or "").lower()
+    candidates = set()
+    rules = [
+        ("N", r"\b(?:force|friction|tension|thrust|weight)\b"),
+        ("m/s^2", r"\bacceleration\b"),
+        ("m/s", r"\b(?:velocity|speed)\b"),
+        ("kg", r"\bmass\b"),
+        ("m", r"\b(?:distance|displacement|length|height)\b"),
+        ("s", r"\btime\b"),
+    ]
+    for unit, pattern in rules:
+        if re.search(pattern, lowered):
+            candidates.add(unit)
+    return candidates
+
+
 def _infer_expected_unit_from_context(
     question: str,
     local_context: str,
     step_text: str,
 ) -> str | None:
-    combined = f"{question} {local_context} {step_text}".lower()
-    if "acceleration" in combined:
-        return "m/s^2"
-    if "velocity" in combined or "speed" in combined:
-        return "m/s"
-    if "distance" in combined or "displacement" in combined:
-        return "m"
-    if "mass" in combined:
-        return "kg"
-    if "force" in combined or "friction" in combined or "pull" in combined or "tension" in combined:
-        return "N"
-    if "time" in combined:
-        return "s"
-    return None
+    variable = (_extract_assigned_variable(step_text) or "").lower()
+    variable_units = {
+        "f": "N",
+        "a": "m/s^2",
+        "u": "m/s",
+        "v": "m/s",
+        "m": "kg",
+        "s": "m",
+        "d": "m",
+        "h": "m",
+        "t": "s",
+    }
+    step_units = _unit_for_quantity_text(_strip_latex_commands(step_text))
+    if len(step_units) == 1:
+        return step_units.pop()
+    nearby_units = _unit_for_quantity_text(_strip_latex_commands(local_context))
+    if len(nearby_units) == 1:
+        return nearby_units.pop()
+
+    question_units = _unit_for_quantity_text(question)
+    contextual_units = nearby_units | question_units
+    if variable in variable_units and variable_units[variable] in contextual_units:
+        return variable_units[variable]
+    return question_units.pop() if len(question_units) == 1 else None
 
 
 def _apply_context_unit_guard(
@@ -670,7 +777,11 @@ def _apply_context_unit_guard(
         return step_result
 
     variable = _extract_assigned_variable(step_text)
-    reported_value = _extract_last_number(step_text)
+    reported_value = (
+        _extract_assigned_numeric_value(step_text, variable)
+        if variable
+        else _extract_last_number(step_text)
+    )
     reported_value_text = _extract_last_number_text(step_text)
     decimals = _decimal_places(reported_value_text)
     expected_unit = _infer_expected_unit_from_context(question, local_context, step_text)
@@ -710,7 +821,8 @@ def _post_process_step_result(
     if _is_heading_like_step(step_text):
         step_result["step_status"] = "right"
         step_result["description"] = ""
-        step_result["step_weight"] = min(step_result["step_weight"], 0.05)
+        step_result["step_weight"] = 0.0
+        step_result["counts_toward_score"] = False
         return step_result
 
     step_result = _apply_rule_override(
@@ -731,6 +843,7 @@ def _post_process_step_result(
     )
     step_result["step_status"] = _coerce_step_status(step_result["step_status"])
     step_result["step_weight"] = _clamp_step_weight(step_result["step_weight"])
+    step_result["counts_toward_score"] = step_result["step_weight"] > 0
     return step_result
 
 
@@ -776,189 +889,64 @@ def _summarize_status_counts(step_results: list[dict[str, Any]]) -> dict[str, in
     }
 
 
-def _resolve_step_weights(step_results: list[dict[str, Any]]) -> dict[str, float]:
-    resolved = {
-        item["stepId"]: max(0.0, float(item.get("step_weight", 0.0)))
-        for item in step_results
-    }
-    if sum(resolved.values()) > 0:
-        return resolved
-    return {item["stepId"]: 1.0 for item in step_results}
+def _counts_toward_score(step: dict[str, Any]) -> bool:
+    if "counts_toward_score" in step:
+        return bool(step["counts_toward_score"])
+    return _clamp_step_weight(step.get("step_weight", 0.0)) > 0
 
 
-def _build_block_results(
+def _build_public_steps(step_results: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        {
+            "stepId": str(step["stepId"]),
+            "text": str(step.get("text", "")),
+            "step_status": _coerce_step_status(step.get("step_status", "unknown")),
+            "counts_toward_score": _counts_toward_score(step),
+            "step_weight": _clamp_step_weight(step.get("step_weight", 0.0)),
+            "step_type": str(step.get("step_type", STEP_TYPE_DEFAULT)),
+            "topic": str(step.get("topic", "General")),
+            "step_understanding": str(
+                step.get("step_understanding", "Step intent is not fully clear.")
+            ),
+            "description": str(step.get("description", "")),
+        }
+        for step in step_results
+    ]
+
+
+def _build_summary(
     step_results: list[dict[str, Any]],
     full_marks: float | None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    if not step_results:
-        summary = {
-            "overall_status": "unknown",
-            "status_breakdown": {key: 0 for key in sorted(STATUS_VALUES)},
-            "step_count": 0,
-            "block_count": 0,
-        }
-        if full_marks is not None:
-            summary["full_marks"] = _clean_marks_value(full_marks)
-            summary["obtained_marks"] = 0
-            summary["percentage"] = 0
-        return [], summary
-
-    weights_by_step_id = _resolve_step_weights(step_results)
-    total_weight = sum(weights_by_step_id.values()) or float(len(step_results))
-    blocks_by_id: dict[str, dict[str, Any]] = {}
-    ordered_ids: list[str] = []
-
-    for step_result in step_results:
-        block_id = str(step_result.get("blockId", "")).strip() or "block_1"
-        if block_id not in blocks_by_id:
-            ordered_ids.append(block_id)
-            blocks_by_id[block_id] = {
-                "blockId": block_id,
-                "blockLabel": str(step_result.get("blockLabel", "")).strip() or block_id,
-                "question_part_label": str(step_result.get("question_part_label", "")).strip(),
-                "question_part_text": str(step_result.get("question_part_text", "")).strip(),
-                "steps": [],
-            }
-        blocks_by_id[block_id]["steps"].append(step_result)
-
-    block_results = []
-    for block_id in ordered_ids:
-        block = blocks_by_id[block_id]
-        block_steps = block["steps"]
-        block_weight = sum(weights_by_step_id[step["stepId"]] for step in block_steps)
-        block_earned = sum(
-            weights_by_step_id[step["stepId"]] * _status_credit(step["step_status"])
-            for step in block_steps
-        )
-        block_payload = {
-            "blockId": block["blockId"],
-            "blockLabel": block["blockLabel"],
-            "question_part_label": block["question_part_label"],
-            "question_part_text": block["question_part_text"],
-            "status": _aggregate_status([step["step_status"] for step in block_steps]),
-            "status_breakdown": _summarize_status_counts(block_steps),
-            "weight": round(block_weight, 3),
-            "steps": block_steps,
-        }
-        if full_marks is not None:
-            block_payload["max_marks"] = _clean_marks_value(full_marks * (block_weight / total_weight))
-            block_payload["obtained_marks"] = _clean_marks_value(full_marks * (block_earned / total_weight))
-        block_results.append(block_payload)
-
-    overall_earned = sum(
-        weights_by_step_id[step["stepId"]] * _status_credit(step["step_status"])
+) -> dict[str, Any]:
+    scored_steps = [
+        step
         for step in step_results
+        if _counts_toward_score(step)
+        and float(step.get("step_weight", 0.0)) > 0
+    ]
+    total_weight = sum(float(step["step_weight"]) for step in scored_steps)
+    earned_weight = sum(
+        float(step["step_weight"]) * _status_credit(step["step_status"])
+        for step in scored_steps
     )
-    obtained_marks = (full_marks * overall_earned / total_weight) if full_marks is not None else None
-
-    summary = {
-        "overall_status": _aggregate_status([step["step_status"] for step in step_results]),
-        "status_breakdown": _summarize_status_counts(step_results),
+    percentage = (earned_weight / total_weight) * 100 if total_weight > 0 else 0.0
+    summary: dict[str, Any] = {
+        "overall_status": (
+            _aggregate_status([step["step_status"] for step in scored_steps])
+            if scored_steps
+            else "unknown"
+        ),
         "step_count": len(step_results),
-        "block_count": len(block_results),
-        "total_weight": round(total_weight, 3),
+        "scored_step_count": len(scored_steps),
+        "percentage": _round_score(percentage),
+        "status_breakdown": _summarize_status_counts(step_results),
     }
-    if full_marks is not None and obtained_marks is not None:
+    if full_marks is not None:
         summary["full_marks"] = _clean_marks_value(full_marks)
-        summary["obtained_marks"] = _clean_marks_value(obtained_marks)
-        summary["percentage"] = _round_score((obtained_marks / full_marks) * 100)
-
-    return block_results, summary
-
-
-def _pick_block_topic(block_steps: list[dict[str, Any]]) -> str:
-    topics: dict[str, int] = {}
-    for step in block_steps:
-        topic = _normalize_whitespace(str(step.get("topic", "")))
-        if not topic:
-            continue
-        topics[topic] = topics.get(topic, 0) + 1
-
-    if not topics:
-        return "General"
-
-    return max(topics, key=lambda topic: (topics[topic], len(topic)))
-
-
-def _pick_block_understanding(block_steps: list[dict[str, Any]]) -> str:
-    understandings = []
-    seen = set()
-    for step in block_steps:
-        understanding = _normalize_whitespace(str(step.get("step_understanding", "")))
-        if not understanding or understanding in seen:
-            continue
-        seen.add(understanding)
-        understandings.append(understanding)
-
-    if not understandings:
-        return "Step intent is not fully clear."
-
-    return " ".join(understandings)
-
-
-def _pick_block_description(
-    block_steps: list[dict[str, Any]],
-    block_status: str,
-) -> str:
-    if block_status == "right":
-        return ""
-
-    preferred_status_order = [block_status]
-    if block_status == "wrong":
-        preferred_status_order.extend(["incomplete", "unknown"])
-    elif block_status == "incomplete":
-        preferred_status_order.append("unknown")
-
-    for status in preferred_status_order:
-        for step in block_steps:
-            if step.get("step_status") != status:
-                continue
-            description = _normalize_whitespace(str(step.get("description", "")))
-            if description:
-                return description
-
-    return ""
-
-
-def _build_block_text(block_steps: list[dict[str, Any]]) -> str:
-    texts = []
-    seen = set()
-    for step in block_steps:
-        text = _normalize_whitespace(str(step.get("text", "")))
-        if not text or text in seen:
-            continue
-        seen.add(text)
-        texts.append(text)
-
-    return "\n".join(texts)
-
-
-def _build_public_response(
-    block_results: list[dict[str, Any]],
-    total_weight: float,
-) -> list[dict[str, Any]]:
-    public_response = []
-    safe_total_weight = total_weight if total_weight > 0 else float(len(block_results) or 1)
-
-    for index, block in enumerate(block_results, start=1):
-        block_steps = list(block.get("steps", []))
-        block_weight = float(block.get("weight", 0.0))
-        public_response.append(
-            {
-                "stepId": str(index),
-                "text": _build_block_text(block_steps),
-                "step_status": _coerce_step_status(block.get("status", "unknown")),
-                "step_weight": round(block_weight / safe_total_weight, 3),
-                "topic": _pick_block_topic(block_steps),
-                "step_understanding": _pick_block_understanding(block_steps),
-                "description": _pick_block_description(
-                    block_steps,
-                    _coerce_step_status(block.get("status", "unknown")),
-                ),
-            }
+        summary["obtained_marks"] = _clean_marks_value(
+            full_marks * earned_weight / total_weight if total_weight > 0 else 0
         )
-
-    return public_response
+    return summary
 
 
 def _finalize_step_result(
@@ -968,7 +956,9 @@ def _finalize_step_result(
     step: dict[str, Any],
     raw_result: dict[str, Any],
 ) -> dict[str, Any]:
-    step_text = _normalize_latex_text(str(raw_result.get("text", step["text"])).strip()) or step["text"]
+    # Model output is judgment only. The student text is immutable evidence and
+    # must not be replaced by a model-corrected version.
+    step_text = _normalize_latex_text(str(step["text"]).strip())
     step_understanding = str(raw_result.get("step_understanding", "")).strip()
     topic = str(raw_result.get("topic", "")).strip()
     step_type = _resolve_step_type(
@@ -1105,24 +1095,24 @@ def _evaluate_reconstructed_steps(
 
 def _build_response_payload(
     *,
-    steps: list[dict[str, Any]],
     final_results: list[dict[str, Any]],
     full_marks: float | None,
-    response_source: str | None = None,
-    fallback_reason: str | None = None,
+    grounding_status: str,
+    grounding_reason: str | None = None,
+    rag_sources: list[dict[str, Any]] | None = None,
+    collection_name: str | None = None,
 ) -> dict[str, Any]:
-    block_results, summary = _build_block_results(final_results, full_marks)
-    payload = {
-        "response": _build_public_response(
-            block_results=block_results,
-            total_weight=float(summary.get("total_weight", 0.0)),
-        ),
+    return {
+        "schema_version": RESPONSE_SCHEMA_VERSION,
+        "steps": _build_public_steps(final_results),
+        "summary": _build_summary(final_results, full_marks),
+        "grounding": {
+            "status": grounding_status,
+            "collection_name": collection_name,
+            "reason": grounding_reason,
+            "sources": rag_sources or [],
+        },
     }
-    if response_source is not None:
-        payload["response_source"] = response_source
-    if fallback_reason is not None:
-        payload["fallback_reason"] = fallback_reason
-    return payload
 
 
 def evaluate_ocr_steps(
@@ -1146,10 +1136,9 @@ def evaluate_ocr_steps(
     )
     logger.info("OCR evaluation completed")
     return _build_response_payload(
-        steps=annotated_steps,
         final_results=final_results,
         full_marks=_coerce_full_marks(full_marks),
-        response_source="llm",
+        grounding_status="not_requested",
     )
 
 
@@ -1160,6 +1149,9 @@ def evaluate_ocr_steps_with_rag(
     top_k: int = 5,
     full_marks: float | None = None,
 ):
+    collection_name = _validate_collection_name(collection_name)
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 20:
+        raise ValueError("top_k must be an integer between 1 and 20")
     normalized_steps = _normalize_ocr_steps(ocr_data)
     logger.info("Evaluating %s OCR steps with RAG", len(normalized_steps))
     normalized_question = _normalize_latex_text(question.strip())
@@ -1168,7 +1160,7 @@ def evaluate_ocr_steps_with_rag(
     question_parts = _extract_question_parts(normalized_question)
     annotated_steps, _ = _build_blocks_from_steps(reconstructed_steps, question_parts)
     question_profile = _build_question_profile(normalized_question)
-    context, fallback_reason = _get_rag_context(
+    context, fallback_reason, rag_sources = _get_rag_context(
         question=normalized_question,
         steps=annotated_steps,
         collection_name=collection_name,
@@ -1183,9 +1175,10 @@ def evaluate_ocr_steps_with_rag(
     )
     logger.info("RAG-backed OCR evaluation completed")
     return _build_response_payload(
-        steps=annotated_steps,
         final_results=final_results,
         full_marks=_coerce_full_marks(full_marks),
-        response_source="rag" if context else "llm",
-        fallback_reason=fallback_reason,
+        grounding_status="used" if context else "fallback",
+        grounding_reason=fallback_reason,
+        rag_sources=rag_sources,
+        collection_name=collection_name,
     )

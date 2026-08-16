@@ -1,9 +1,11 @@
+import ast
 import json
 import logging
+import math
 import os
 import re
-import time
 import uuid
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -12,13 +14,9 @@ from qdrant_client import QdrantClient
 from qdrant_client.models import Distance, PointStruct, VectorParams
 
 from ..system_instruction import (
-    DIRECT_STEP_EVALUATION_SYSTEM_INSTRUCTION,
     DOCUMENT_RAG_SYSTEM_INSTRUCTION,
-    GROUNDED_STEP_EVALUATION_SYSTEM_INSTRUCTION,
     NUMERIC_VERIFICATION_SYSTEM_INSTRUCTION,
-    build_direct_step_evaluation_prompt,
     build_document_rag_prompt,
-    build_grounded_step_evaluation_prompt,
     build_numeric_verification_prompt,
 )
 
@@ -30,6 +28,15 @@ OPENAI_EMBEDDING_MODEL = os.getenv(
 )
 GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0"))
 RAG_MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "0.35"))
+RAG_MAX_CONTEXT_CHARS = int(os.getenv("RAG_MAX_CONTEXT_CHARS", "24000"))
+RAG_MAX_DOCUMENT_BYTES = int(os.getenv("RAG_MAX_DOCUMENT_BYTES", str(5 * 1024 * 1024)))
+ENGINE_ROOT = Path(__file__).resolve().parents[2]
+_rag_document_root = Path(os.getenv("RAG_DOCUMENT_ROOT", "../Data")).expanduser()
+RAG_DOCUMENT_ROOT = (
+    _rag_document_root
+    if _rag_document_root.is_absolute()
+    else ENGINE_ROOT / _rag_document_root
+).resolve()
 QDRANT_COLLECTION_NAME = os.getenv(
     "QDRANT_COLLECTION_NAME_EXP_04",
     os.getenv("QDRANT_COLLECTION_NAME", "evaluation_engine"),
@@ -51,12 +58,19 @@ STANDARD_FORMULAS = {
 }
 
 
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-qdrant_client = QdrantClient(
-    url=QDRANT_URL,
-    api_key=QDRANT_API_KEY,
-    timeout=QDRANT_TIMEOUT,
-)
+@lru_cache(maxsize=1)
+def _get_openai_client() -> OpenAI:
+    return OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
+
+@lru_cache(maxsize=1)
+def _get_qdrant_client() -> QdrantClient:
+    return QdrantClient(
+        url=QDRANT_URL,
+        api_key=QDRANT_API_KEY,
+        timeout=QDRANT_TIMEOUT,
+        check_compatibility=False,
+    )
 
 
 def _get_gemini_sdk():
@@ -160,7 +174,11 @@ def _normalize_latex_text(text: str) -> str:
 
     cleaned = re.sub(r"\$\$(.*?)\$\$", r"\1", cleaned)
     cleaned = re.sub(r"\$(.*?)\$", r"\1", cleaned)
-    cleaned = re.sub(r"(\d)(m/s\^2|m/s|kg|cm|mm|km|m|s)\b", r"\1 \\mathrm{\2}", cleaned)
+    cleaned = re.sub(
+        r"(\d)(m/s(?:\^2|²)|m\\,s\^\{-2\}|m/s|kg|cm|mm|km|N|m|s)\b",
+        r"\1 \\mathrm{\2}",
+        cleaned,
+    )
     return cleaned
 
 
@@ -207,13 +225,46 @@ def _safe_eval_numeric(expr: str, variable_values: dict[str, float] | None = Non
         for name, value in variable_values.items():
             python_expr = re.sub(rf"\b{re.escape(name)}\b", str(value), python_expr)
 
-    if re.search(r"[^0-9a-zA-Z_+\-*/().]", python_expr):
+    if len(python_expr) > 256 or re.search(r"[^0-9a-zA-Z_+\-*/().]", python_expr):
         return None
 
     try:
-        return float(eval(python_expr, {"__builtins__": {}}, {}))
-    except Exception:
+        parsed = ast.parse(python_expr, mode="eval")
+        value = _evaluate_numeric_ast(parsed.body)
+        if not math.isfinite(value) or abs(value) > 1e100:
+            return None
+        return float(value)
+    except (ArithmeticError, SyntaxError, TypeError, ValueError):
         return None
+
+
+def _evaluate_numeric_ast(node: ast.AST) -> float:
+    """Evaluate a deliberately small arithmetic-only AST."""
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return float(node.value)
+
+    if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.UAdd, ast.USub)):
+        value = _evaluate_numeric_ast(node.operand)
+        return value if isinstance(node.op, ast.UAdd) else -value
+
+    if not isinstance(node, ast.BinOp):
+        raise ValueError("unsupported numeric expression")
+
+    left = _evaluate_numeric_ast(node.left)
+    right = _evaluate_numeric_ast(node.right)
+    if isinstance(node.op, ast.Add):
+        return left + right
+    if isinstance(node.op, ast.Sub):
+        return left - right
+    if isinstance(node.op, ast.Mult):
+        return left * right
+    if isinstance(node.op, ast.Div):
+        return left / right
+    if isinstance(node.op, ast.Pow):
+        if abs(right) > 12 or abs(left) > 1e12:
+            raise ValueError("unsafe exponent")
+        return left ** right
+    raise ValueError("unsupported numeric operator")
 
 
 def _extract_equation(text: str) -> tuple[str, str] | None:
@@ -236,6 +287,27 @@ def _extract_assigned_variable(step_text: str) -> str | None:
     if match:
         return match.group(1)
     return None
+
+
+def _extract_assigned_numeric_value(step_text: str, variable: str) -> float | None:
+    """Extract an assigned numeric expression, including fractions such as ``-4/5``."""
+    equation = _extract_equation(step_text)
+    if not equation:
+        return None
+
+    left, right = equation
+    assigned = _extract_assigned_variable(f"{left}=")
+    if assigned != variable:
+        return None
+
+    right = re.sub(r"\\mathrm\{[^}]*\}", "", right)
+    right = re.sub(
+        r"\s+(?:m/s(?:\^2|²)|m\\,s\^\{-2\}|m/s|kg|cm|mm|km|N|newtons?|m|s)\s*$",
+        "",
+        right,
+        flags=re.IGNORECASE,
+    )
+    return _safe_eval_numeric(right)
 
 
 def _extract_last_number(text: str) -> float | None:
@@ -261,28 +333,73 @@ def _decimal_places(number_text: str | None) -> int | None:
     return len(number_text.split(".", 1)[1])
 
 
+def _canonicalize_unit(unit: str | None) -> str | None:
+    if not unit:
+        return None
+    compact = re.sub(r"\s+", "", unit).replace("²", "^2").lower()
+    aliases = {
+        "n": "N",
+        "newton": "N",
+        "newtons": "N",
+        "m/s^2": "m/s^2",
+        "m/s2": "m/s^2",
+        "m\\,s^{-2}": "m/s^2",
+        "ms^{-2}": "m/s^2",
+        "m/s": "m/s",
+        "kg": "kg",
+        "cm": "cm",
+        "mm": "mm",
+        "km": "km",
+        "m": "m",
+        "s": "s",
+    }
+    return aliases.get(compact, unit.strip())
+
+
 def _extract_unit(text: str) -> str | None:
     match = re.search(r"\\mathrm\{([^}]*)\}", text)
     if match:
-        return match.group(1).strip()
+        return _canonicalize_unit(match.group(1))
 
-    plain_match = re.search(r"\b(m/s\^2|m/s|kg|cm|mm|km|m|s)\b", _strip_latex_commands(text))
+    plain_match = re.search(
+        r"(?<![A-Za-z])(m/s(?:\^2|²)|m/s|kg|cm|mm|km|N|newtons?|m|s)\b",
+        _strip_latex_commands(text),
+        flags=re.IGNORECASE,
+    )
     if plain_match:
-        return plain_match.group(1).strip()
+        return _canonicalize_unit(plain_match.group(1))
     return None
 
 
 def _infer_expected_unit(question: str, local_context: str, step_text: str) -> str | None:
-    combined = f"{question} {local_context} {step_text}".lower()
-    if "acceleration" in combined:
-        return "m/s^2"
-    if "velocity" in combined or "speed" in combined:
-        return "m/s"
-    if "distance" in combined or "displacement" in combined or re.search(r"\bS\s*=", step_text):
-        return "m"
-    if "time" in combined:
-        return "s"
-    return None
+    step_plain = _strip_latex_commands(step_text)
+    variable = _extract_assigned_variable(step_text)
+    step_lower = step_plain.lower()
+
+    local_rules = [
+        ("N", r"\b(?:force|friction|tension|thrust|weight)\b", {"f"}),
+        ("m/s^2", r"\bacceleration\b", {"a"}),
+        ("m/s", r"\b(?:velocity|speed)\b", {"u", "v"}),
+        ("kg", r"\bmass\b", {"m"}),
+        ("m", r"\b(?:distance|displacement|length|height)\b", {"s", "d", "h"}),
+        ("s", r"\btime\b", {"t"}),
+    ]
+    for unit, pattern, _ in local_rules:
+        if re.search(pattern, step_lower):
+            return unit
+
+    nearby = f"{local_context}".lower()
+    nearby_units = {unit for unit, pattern, _ in local_rules if re.search(pattern, nearby)}
+    if len(nearby_units) == 1:
+        return nearby_units.pop()
+
+    question_lower = question.lower()
+    question_units = {unit for unit, pattern, _ in local_rules if re.search(pattern, question_lower)}
+    contextual_units = nearby_units | question_units
+    for unit, _, variables in local_rules:
+        if variable and variable.lower() in variables and unit in contextual_units:
+            return unit
+    return question_units.pop() if len(question_units) == 1 else None
 
 
 def _solve_linear_value_from_equation(equation_text: str, variable: str) -> float | None:
@@ -317,7 +434,9 @@ def _find_expected_numeric_value(
 ) -> float | None:
     lines = []
     for raw_line in (local_context or "").splitlines():
-        _, _, content = raw_line.partition(":")
+        _, separator, content = raw_line.partition(":")
+        if not separator:
+            content = raw_line
         cleaned = content.strip()
         if variable in cleaned and "=" in cleaned:
             lines.append(cleaned)
@@ -441,12 +560,19 @@ def _apply_deterministic_step_checks(
     local_context: str,
 ) -> dict[str, Any]:
     variable = _extract_assigned_variable(step_text)
-    reported_value = _extract_last_number(step_text)
+    reported_value = (
+        _extract_assigned_numeric_value(step_text, variable)
+        if variable
+        else _extract_last_number(step_text)
+    )
     expected_unit = _infer_expected_unit(question, local_context, step_text)
     reported_unit = _extract_unit(step_text)
 
     if variable and reported_value is not None:
-        expected_value = _find_expected_numeric_value(variable, local_context)
+        expected_value = _find_expected_numeric_value(
+            variable,
+            f"{question}\n{local_context}",
+        )
         if expected_value is not None:
             if abs(reported_value - expected_value) <= NUMERIC_TOLERANCE:
                 if expected_unit and not reported_unit:
@@ -678,6 +804,8 @@ def _coerce_step_results(
 
 
 def create_qdrant_collection(collection_name: str = QDRANT_COLLECTION_NAME):
+    collection_name = _validate_collection_name(collection_name)
+    qdrant_client = _get_qdrant_client()
     if qdrant_client.collection_exists(collection_name=collection_name):
         return collection_name
 
@@ -692,6 +820,13 @@ def create_qdrant_collection(collection_name: str = QDRANT_COLLECTION_NAME):
 
 
 def chunk_document_text(text: str, chunk_size: int = 1500, overlap: int = 200):
+    if not isinstance(text, str):
+        raise TypeError("document text must be a string")
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be greater than zero")
+    if overlap < 0 or overlap >= chunk_size:
+        raise ValueError("overlap must be between zero and chunk_size - 1")
+
     cleaned_text = " ".join(text.split())
     if not cleaned_text:
         return []
@@ -708,7 +843,7 @@ def chunk_document_text(text: str, chunk_size: int = 1500, overlap: int = 200):
 
 
 def get_embedding(text: str):
-    response = openai_client.embeddings.create(
+    response = _get_openai_client().embeddings.create(
         model=OPENAI_EMBEDDING_MODEL,
         input=text,
     )
@@ -722,7 +857,7 @@ def get_embeddings(texts: list[str], batch_size: int = EMBEDDING_BATCH_SIZE):
     embeddings = []
     for start in range(0, len(texts), batch_size):
         batch = texts[start:start + batch_size]
-        response = openai_client.embeddings.create(
+        response = _get_openai_client().embeddings.create(
             model=OPENAI_EMBEDDING_MODEL,
             input=batch,
         )
@@ -735,13 +870,20 @@ def index_documents(
     documents: list[dict[str, Any]],
     collection_name: str = QDRANT_COLLECTION_NAME,
 ):
+    collection_name = _validate_collection_name(collection_name)
     create_qdrant_collection(collection_name)
 
     chunk_records = []
-    for document in documents:
-        document_id = document.get("document_id") or str(uuid.uuid4())
+    for index, document in enumerate(documents, start=1):
+        if not isinstance(document, dict):
+            raise TypeError(f"document {index} must be an object")
+        document_id = str(document.get("document_id") or uuid.uuid4()).strip()
         document_text = document.get("text", "")
         metadata = document.get("metadata", {})
+        if not isinstance(document_text, str):
+            raise TypeError(f"document {index} text must be a string")
+        if not isinstance(metadata, dict):
+            raise TypeError(f"document {index} metadata must be an object")
 
         for chunk_index, chunk_text in enumerate(chunk_document_text(document_text)):
             chunk_records.append(
@@ -756,10 +898,22 @@ def index_documents(
     points = []
     if chunk_records:
         embeddings = get_embeddings([record["text"] for record in chunk_records])
+        if len(embeddings) != len(chunk_records):
+            raise RuntimeError("embedding provider returned an unexpected number of vectors")
         for record, embedding in zip(chunk_records, embeddings):
+            if len(embedding) != EMBEDDING_VECTOR_SIZE:
+                raise ValueError(
+                    "embedding vector size does not match EMBEDDING_VECTOR_SIZE "
+                    f"({len(embedding)} != {EMBEDDING_VECTOR_SIZE})"
+                )
             points.append(
                 PointStruct(
-                    id=str(uuid.uuid4()),
+                    id=str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL,
+                            f"{collection_name}:{record['document_id']}:{record['chunk_index']}",
+                        )
+                    ),
                     vector=embedding,
                     payload=record,
                 )
@@ -767,7 +921,7 @@ def index_documents(
 
         for start in range(0, len(points), QDRANT_UPSERT_BATCH_SIZE):
             batch = points[start:start + QDRANT_UPSERT_BATCH_SIZE]
-            qdrant_client.upsert(
+            _get_qdrant_client().upsert(
                 collection_name=collection_name,
                 points=batch,
                 wait=True,
@@ -776,8 +930,30 @@ def index_documents(
     return {"collection_name": collection_name, "indexed_chunks": len(points)}
 
 
+def _resolve_rag_document_path(file_path: str) -> Path:
+    text_path = Path(file_path).expanduser()
+    if not text_path.is_absolute():
+        text_path = RAG_DOCUMENT_ROOT.parent / text_path
+    text_path = text_path.resolve()
+    try:
+        text_path.relative_to(RAG_DOCUMENT_ROOT)
+    except ValueError as exc:
+        raise PermissionError(
+            f"Document path must be inside RAG_DOCUMENT_ROOT: {RAG_DOCUMENT_ROOT}"
+        ) from exc
+    if not text_path.is_file():
+        raise FileNotFoundError(f"Text file not found: {file_path}")
+    if text_path.suffix.lower() not in {".txt", ".md"}:
+        raise ValueError("RAG text documents must use a .txt or .md extension")
+    if text_path.stat().st_size > RAG_MAX_DOCUMENT_BYTES:
+        raise ValueError(
+            f"RAG text documents must not exceed {RAG_MAX_DOCUMENT_BYTES} bytes"
+        )
+    return text_path
+
+
 def extract_text_file_content(file_path: str):
-    return Path(file_path).read_text(encoding="utf-8").strip()
+    return _resolve_rag_document_path(file_path).read_text(encoding="utf-8").strip()
 
 
 def index_text_documents(
@@ -789,10 +965,7 @@ def index_text_documents(
 
     for document_path in document_paths:
         logger.info("Indexing document: %s", document_path)
-        text_path = Path(document_path)
-        if not text_path.exists():
-            raise FileNotFoundError(f"Text file not found: {document_path}")
-
+        text_path = _resolve_rag_document_path(document_path)
         document_text = extract_text_file_content(str(text_path))
         if not document_text:
             continue
@@ -817,8 +990,15 @@ def retrieve_relevant_chunks(
     collection_name: str = QDRANT_COLLECTION_NAME,
     top_k: int = 5,
 ):
+    query = str(query or "").strip()
+    if not query:
+        raise ValueError("retrieval query must not be empty")
+    collection_name = _validate_collection_name(collection_name)
+    if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 20:
+        raise ValueError("top_k must be an integer between 1 and 20")
+
     query_vector = get_embedding(query)
-    search_result = qdrant_client.query_points(
+    search_result = _get_qdrant_client().query_points(
         collection_name=collection_name,
         query=query_vector,
         limit=top_k,
@@ -837,30 +1017,15 @@ def retrieve_relevant_chunks(
     ]
 
 
-def _is_grounded_context(relevant_chunks: list[dict[str, Any]]) -> bool:
-    if not relevant_chunks:
-        return False
-
-    return any(
-        isinstance(chunk.get("score"), (int, float)) and chunk["score"] >= RAG_MIN_SCORE
-        for chunk in relevant_chunks
-    )
-
-
-def _fallback_to_llm(
-    ocr_data: list[dict[str, Any]],
-    question: str,
-    reason: str,
-):
-    fallback_result = evaluate_ocr_steps(
-        ocr_data=ocr_data,
-        question=question,
-    )
-    return {
-        "response": fallback_result.get("response", []),
-        "response_source": "llm",
-        "fallback_reason": reason,
-    }
+def _validate_collection_name(collection_name: str | None) -> str:
+    cleaned = str(collection_name or "").strip()
+    if not cleaned:
+        cleaned = QDRANT_COLLECTION_NAME
+    if len(cleaned) > 128 or not re.fullmatch(r"[A-Za-z0-9_.-]+", cleaned):
+        raise ValueError(
+            "collection_name must contain only letters, numbers, underscores, dots, or hyphens"
+        )
+    return cleaned
 
 
 def generate_document_answer(
@@ -896,63 +1061,16 @@ def generate_document_answer(
 def evaluate_ocr_steps(
     ocr_data: list[dict[str, Any]],
     question: str = "",
+    full_marks: float | None = None,
 ):
-    normalized_steps = _normalize_ocr_steps(ocr_data)
-    logger.info("Evaluating %s OCR steps", len(normalized_steps))
+    """Compatibility entry point for the canonical flat evaluator."""
+    from .testing_engine import evaluate_ocr_steps as evaluate_steps
 
-    if not normalized_steps:
-        return {"response": []}
-
-    question = _normalize_latex_text(question.strip())
-    parsed_response = _generate_json_response(
-        model=GEMINI_CHAT_MODEL,
-        system_instruction=DIRECT_STEP_EVALUATION_SYSTEM_INSTRUCTION,
-        user_content=build_direct_step_evaluation_prompt(
-            question=question,
-            ocr_data=normalized_steps,
-        ),
-        schema={
-            "type": "object",
-            "properties": {
-                "response": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "stepId": {"type": "string"},
-                            "text": {"type": "string"},
-                            "step_status": {
-                                "type": "string",
-                                "enum": ["right", "wrong", "unknown", "incomplete"],
-                            },
-                            "step_weight": {
-                                "type": "number",
-                                "minimum": 0,
-                                "maximum": 1,
-                            },
-                            "topic": {"type": "string"},
-                            "step_understanding": {"type": "string"},
-                            "description": {"type": "string"},
-                        },
-                        "required": [
-                            "stepId",
-                            "text",
-                            "step_status",
-                            "step_weight",
-                            "topic",
-                            "step_understanding",
-                            "description",
-                        ],
-                    },
-                }
-            },
-            "required": ["response"],
-        },
+    return evaluate_steps(
+        ocr_data=ocr_data,
+        question=question,
+        full_marks=full_marks,
     )
-    raw_results = parsed_response.get("response", []) if isinstance(parsed_response, dict) else []
-    final_results = _coerce_step_results(normalized_steps, raw_results, question)
-    logger.info("OCR evaluation completed")
-    return {"response": final_results}
 
 
 def evaluate_ocr_steps_with_rag(
@@ -960,165 +1078,15 @@ def evaluate_ocr_steps_with_rag(
     question: str = "",
     collection_name: str = QDRANT_COLLECTION_NAME,
     top_k: int = 5,
+    full_marks: float | None = None,
 ):
-    logger.info("Evaluating %s OCR steps with RAG", len(ocr_data))
-    normalized_steps = _normalize_ocr_steps(ocr_data)
-    if not normalized_steps:
-        return {
-            "response": [],
-            "response_source": "rag",
-            "fallback_reason": None,
-        }
+    """Compatibility entry point for the canonical flat RAG evaluator."""
+    from .testing_engine import evaluate_ocr_steps_with_rag as evaluate_steps_with_rag
 
-    step_results = []
-    question = _normalize_latex_text(question.strip())
-    grounded_contexts: dict[str, str] = {}
-    retrieval_issue = None
-
-    for index, step in enumerate(normalized_steps):
-        step_id = step.get("stepId", str(uuid.uuid4()))
-        step_text = _normalize_latex_text(step.get("text", "").strip())
-
-        if not step_text:
-            continue
-
-        local_context = _build_local_step_context(normalized_steps, index)
-        retrieval_query = (
-            f"Question: {question}\nStep: {step_text}\nNearby steps:\n{local_context}"
-            if question
-            else f"Step: {step_text}\nNearby steps:\n{local_context}"
-        )
-        retrieval_start = time.monotonic()
-
-        try:
-            relevant_chunks = retrieve_relevant_chunks(
-                query=retrieval_query,
-                collection_name=collection_name,
-                top_k=top_k,
-            )
-        except Exception as exc:
-            retrieval_issue = f"retrieval_error: {exc}"
-            logger.warning("Step %s retrieval failed: %s", step_id, exc)
-            break
-
-        logger.info(
-            "Step %s retrieval returned %s chunks in %.2fs",
-            step_id,
-            len(relevant_chunks),
-            time.monotonic() - retrieval_start,
-        )
-        if not _is_grounded_context(relevant_chunks):
-            retrieval_issue = "context_issue"
-            logger.warning(
-                "Step %s did not meet grounding threshold %.2f",
-                step_id,
-                RAG_MIN_SCORE,
-            )
-            break
-
-        grounded_contexts[step_id] = "\n\n".join(chunk["text"] for chunk in relevant_chunks)
-
-    if retrieval_issue:
-        return _fallback_to_llm(
-            ocr_data=normalized_steps,
-            question=question,
-            reason=retrieval_issue,
-        )
-
-    for index, step in enumerate(normalized_steps):
-        step_start = time.monotonic()
-        step_id = step.get("stepId", str(uuid.uuid4()))
-        step_text = _normalize_latex_text(step.get("text", "").strip())
-
-        if not step_text:
-            continue
-
-        logger.info(
-            "Processing step %s/%s (step_id=%s)",
-            index + 1,
-            len(ocr_data),
-            step_id,
-        )
-
-        local_context = _build_local_step_context(normalized_steps, index)
-        context = grounded_contexts.get(step_id, "")
-
-        model_start = time.monotonic()
-        step_result = _generate_json_response(
-            model=GEMINI_CHAT_MODEL,
-            system_instruction=GROUNDED_STEP_EVALUATION_SYSTEM_INSTRUCTION,
-            user_content=build_grounded_step_evaluation_prompt(
-                question=question,
-                step_id=step_id,
-                step_text=step_text,
-                local_context=local_context,
-                retrieved_context=context,
-            ),
-            schema={
-                "type": "object",
-                "properties": {
-                    "stepId": {"type": "string"},
-                    "text": {"type": "string"},
-                    "step_status": {
-                        "type": "string",
-                        "enum": ["right", "wrong", "unknown", "incomplete"],
-                    },
-                    "step_weight": {
-                        "type": "number",
-                        "minimum": 0,
-                        "maximum": 1,
-                    },
-                    "topic": {"type": "string"},
-                    "step_understanding": {"type": "string"},
-                    "description": {"type": "string"},
-                },
-                "required": [
-                    "stepId",
-                    "text",
-                    "step_status",
-                    "step_weight",
-                    "topic",
-                    "step_understanding",
-                    "description",
-                ],
-            },
-        )
-        logger.info(
-            "Step %s model call completed in %.2fs",
-            step_id,
-            time.monotonic() - model_start,
-        )
-
-        step_result = _align_step_result(step_result)
-        step_result = _apply_rule_override(step_result, _step_type_check(step_text))
-        step_result = _apply_rule_override(
-            step_result,
-            _formula_checker(step_text, question, local_context),
-        )
-        if _needs_numeric_verification(step_text):
-            step_result = _verify_numeric_step(
-                step_result=step_result,
-                question=question,
-                step_text=step_text,
-                local_context=local_context,
-            )
-        step_result = _apply_deterministic_step_checks(
-            step_result=step_result,
-            question=question,
-            step_text=step_text,
-            local_context=local_context,
-        )
-
-        step_results.append(step_result)
-        logger.info(
-            "Step %s completed in %.2fs",
-            step_id,
-            time.monotonic() - step_start,
-        )
-
-    logger.info("RAG-backed OCR evaluation completed")
-    return {
-        "response": step_results,
-        "response_source": "rag",
-        "fallback_reason": None,
-    }
+    return evaluate_steps_with_rag(
+        ocr_data=ocr_data,
+        question=question,
+        collection_name=collection_name,
+        top_k=top_k,
+        full_marks=full_marks,
+    )

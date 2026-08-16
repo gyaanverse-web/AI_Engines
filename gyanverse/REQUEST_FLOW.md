@@ -6,7 +6,7 @@ This project has one main path for image analysis.
 
 1. The user uploads an answer image in the Svelte frontend.
 2. The frontend sends a `POST` request to `/api/analyze-image`.
-3. The SvelteKit route forwards the request to the Flask backend at `/get_analysis`.
+3. The SvelteKit route forwards the request to the Flask backend at `/evaluation_engine/get_analysis`.
 4. The Flask backend calls the shared `analyzer` function.
 5. `analyzer` runs OCR if needed, then evaluates the steps.
 6. The frontend renders the analysis output on the page.
@@ -25,7 +25,7 @@ Payload sent from the browser:
 
 ### 2) SvelteKit API to Flask backend
 
-`POST /get_analysis`
+`POST /evaluation_engine/get_analysis`
 
 The SvelteKit endpoint acts as a proxy.
 It forwards the image and question to the Python backend orchestrator.
@@ -58,19 +58,25 @@ This step compares the extracted steps against the expected solution logic and r
 
 The final response contains step-by-step analysis data such as:
 
+- response schema version
 - step status
+- whether the step counts toward the score
 - issue description
 - step understanding
 - step weight
 - OCR text for each step
+- weighted summary and RAG grounding status
+
+The public API uses one flat `steps` array. OCR source IDs and multipart grouping metadata
+are retained internally but are not duplicated in the response.
 
 The frontend uses that response to show the analysis result.
 
 ## In Short
 
-`User uploads image` -> `POST /api/analyze-image` -> `POST /checked_json_ocr` -> `OCR extraction` -> `step evaluation` -> `render result`
+`User uploads image` -> `POST /api/analyze-image` -> `POST /evaluation_engine/get_analysis` -> `OCR extraction` -> `RAG retrieval` -> `step evaluation` -> `render result`
 
 ## Useful Backend Routes
 
-- `/get_json_ocr` - OCR only
-- `/get_analysis` - direct analysis route
+- `/evaluation_engine/get_json_ocr` - OCR only
+- `/evaluation_engine/get_analysis` - RAG-backed analysis with a controlled LLM fallback

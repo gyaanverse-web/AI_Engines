@@ -33,6 +33,9 @@ Content-Type: application/json
 
 Returns OCR-preserved steps under `ocr_data`.
 
+Local image paths must resolve inside `OCR_LOCAL_FILE_ROOT` (the repository root by
+default), use JPEG/PNG/WEBP/GIF, and stay within `OCR_MAX_IMAGE_BYTES`.
+
 ## Evaluate OCR steps
 
 ```http
@@ -67,7 +70,7 @@ Content-Type: application/json
 }
 ```
 
-The response includes `response_source` (`rag` or `llm`) and a `response` array containing the evaluated steps.
+The response uses the flat evaluation contract documented below.
 
 ## Evaluation status
 
@@ -88,9 +91,73 @@ Content-Type: application/json
 {
   "image_source": "/absolute/path/to/solution.jpg",
   "question": "Enter the original question here.",
+  "collection_name": "evaluation_engine",
+  "top_k": 5,
   "full_marks": 5
 }
 ```
+
+This main application flow is RAG-backed. If Qdrant is unavailable or no retrieved
+chunk meets `RAG_MIN_SCORE`, evaluation continues with the question and student work,
+and returns `grounding.status: "fallback"` plus a stable `grounding.reason`.
+
+## Evaluation response
+
+Evaluation endpoints return one flat, versioned contract:
+
+- `steps`: logical step judgments with original OCR evidence preserved.
+- `summary`: counts and a weighted percentage; marks are included when `full_marks` is supplied.
+- `grounding`: `used`, `fallback`, or `not_requested`, plus sources supplied to the evaluator.
+
+`counts_toward_score` is false for copied questions, headings, labels, and irrelevant work.
+`sourceStepIds` and multipart block metadata remain internal and are not exposed publicly.
+
+```json
+{
+  "schema_version": "1.0",
+  "steps": [
+    {
+      "stepId": "1",
+      "text": "5x - 2 = 22x + 10",
+      "step_status": "right",
+      "counts_toward_score": true,
+      "step_weight": 0.3,
+      "step_type": "calculation_based",
+      "topic": "Linear Equations",
+      "step_understanding": "The student correctly expands the equation.",
+      "description": ""
+    }
+  ],
+  "summary": {
+    "overall_status": "right",
+    "step_count": 1,
+    "scored_step_count": 1,
+    "percentage": 100,
+    "status_breakdown": {
+      "right": 1,
+      "wrong": 0,
+      "incomplete": 0,
+      "unknown": 0
+    }
+  },
+  "grounding": {
+    "status": "used",
+    "collection_name": "evaluation_engine",
+    "reason": null,
+    "sources": [
+      {
+        "rank": 1,
+        "score": 0.92,
+        "document_id": "algebra-chapter-2",
+        "chunk_index": 3,
+        "metadata": {"chapter": "Linear Equations"}
+      }
+    ]
+  }
+}
+```
+
+`top_k` must be an integer from 1 to 20. `full_marks`, when provided, must be positive.
 
 ## Index RAG documents
 
@@ -117,4 +184,9 @@ For local text files, use `POST /evaluation_engine/index_text_documents` with:
 }
 ```
 
-All validation failures return HTTP `400`; processing failures return HTTP `500` with an `error` field.
+Local RAG files must be `.txt` or `.md`, resolve inside `RAG_DOCUMENT_ROOT` (`Data/`
+by default), and stay within `RAG_MAX_DOCUMENT_BYTES`.
+
+All validation failures return HTTP `400`; processing failures return HTTP `500` with a
+generic `error` field. Detailed provider errors are logged server-side and are not exposed
+to clients.

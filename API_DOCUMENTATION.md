@@ -18,10 +18,10 @@ Main implemented analysis flow:
 Browser
   -> POST /api/analyze-image
   -> SvelteKit proxy
-  -> POST http://127.0.0.1:5000/get_analysis
+  -> POST http://127.0.0.1:5000/evaluation_engine/get_analysis
   -> Flask analyzer
   -> OpenAI OCR
-  -> OpenAI step evaluation
+  -> Qdrant retrieval + grounded Gemini step evaluation
   -> JSON response
 ```
 
@@ -33,7 +33,8 @@ Base URL: same origin as the SvelteKit app.
 
 ## POST `/api/analyze-image`
 
-Proxy endpoint used by the frontend. It forwards image analysis requests to the Flask engine `/get_analysis` route.
+Proxy endpoint used by the frontend. It forwards image analysis requests to the Flask engine
+`/evaluation_engine/get_analysis` route.
 
 ### Request Body
 
@@ -61,26 +62,13 @@ The endpoint accepts any one of these fields:
 | Field | Type | Default | Description |
 | --- | --- | --- | --- |
 | `question` | string | `""` | Original question text. |
-| `top_k` | number | `5` | Intended RAG retrieval count. Currently forwarded, but the active analyzer does not use it. |
-| `collection_name` | string | `ANALYSIS_COLLECTION_NAME` env var or empty | Intended Qdrant collection name. Currently forwarded, but the active analyzer does not use it. |
+| `top_k` | number | `5` | Number of RAG chunks to retrieve; must be from 1 to 20. |
+| `collection_name` | string | `ANALYSIS_COLLECTION_NAME` env var or engine default | Qdrant collection used for grounding. |
 
 ### Success Response
 
-```json
-{
-  "response": [
-    {
-      "stepId": "1",
-      "text": "Given...",
-      "step_status": "right",
-      "step_weight": 0.5,
-      "topic": "Work and Energy",
-      "step_understanding": "Student lists known values.",
-      "description": ""
-    }
-  ]
-}
-```
+Returns the flat, versioned response documented under
+`POST /evaluation_engine/get_analysis`.
 
 ### Error Responses
 
@@ -114,7 +102,7 @@ curl -X POST http://localhost:5173/api/analyze-image \
 
 Base URL: `http://127.0.0.1:5000`
 
-Implemented in `engines/routes.py`.
+Implemented in `engines/evaluation_engine/routes.py`.
 
 ## GET `/`
 
@@ -134,7 +122,7 @@ curl http://127.0.0.1:5000/
 
 ---
 
-## POST `/get_json_ocr`
+## POST `/evaluation_engine/get_json_ocr`
 
 Runs OCR only and returns extracted solution steps.
 
@@ -184,14 +172,14 @@ Runs OCR only and returns extracted solution steps.
 ### Example
 
 ```bash
-curl -X POST http://127.0.0.1:5000/get_json_ocr \
+curl -X POST http://127.0.0.1:5000/evaluation_engine/get_json_ocr \
   -H "Content-Type: application/json" \
   -d '{"source":"Data/testImage4.jpeg"}'
 ```
 
 ---
 
-## POST `/get_analysis`
+## POST `/evaluation_engine/get_analysis`
 
 Runs full analysis from an image source. The backend performs OCR first, then evaluates each extracted step.
 
@@ -212,35 +200,58 @@ Runs full analysis from an image source. The backend performs OCR first, then ev
 | --- | --- | --- | --- |
 | `image_source` | string | Yes | Data URL, remote URL, or local image path. |
 | `question` | string | No | Original question text. Improves evaluation context. |
-| `collection_name` | string | No | Accepted by the route, but currently not used by the active analyzer. |
-| `top_k` | number | No | Accepted by the route, but currently not used by the active analyzer. |
+| `collection_name` | string | No | Qdrant collection used for grounding. |
+| `top_k` | number | No | RAG retrieval count from 1 to 20. |
 
 ### Success Response
 
 ```json
 {
-  "response": [
+  "schema_version": "1.0",
+  "steps": [
     {
       "stepId": "1",
-      "text": "Given m = 1500\\ \\mathrm{kg}",
+      "text": "5x - 2 = 22x + 10",
       "step_status": "right",
-      "step_weight": 0.5,
-      "topic": "Work and Energy",
-      "step_understanding": "Student identifies the mass.",
+      "counts_toward_score": true,
+      "step_weight": 0.3,
+      "step_type": "calculation_based",
+      "topic": "Linear Equations",
+      "step_understanding": "The student correctly expands the equation.",
       "description": ""
-    },
-    {
-      "stepId": "2",
-      "text": "v = 60",
-      "step_status": "incomplete",
-      "step_weight": 0.5,
-      "topic": "Units",
-      "step_understanding": "Student writes final velocity.",
-      "description": "Missing: unit conversion; Correct step: convert km/h to m/s"
     }
-  ]
+  ],
+  "summary": {
+    "overall_status": "right",
+    "step_count": 1,
+    "scored_step_count": 1,
+    "percentage": 100,
+    "status_breakdown": {
+      "right": 1,
+      "wrong": 0,
+      "incomplete": 0,
+      "unknown": 0
+    }
+  },
+  "grounding": {
+    "status": "used",
+    "collection_name": "evaluation_engine",
+    "reason": null,
+    "sources": [
+      {
+        "rank": 1,
+        "score": 0.92,
+        "document_id": "algebra-chapter-2",
+        "chunk_index": 3,
+        "metadata": {"chapter": "Linear Equations"}
+      }
+    ]
+  }
 }
 ```
+
+`counts_toward_score` is false for copied questions, headings, labels, and irrelevant
+work. Blocks, duplicate response arrays, and internal OCR `sourceStepIds` are not public.
 
 ### `step_status` Values
 
@@ -268,7 +279,7 @@ Runs full analysis from an image source. The backend performs OCR first, then ev
 ### Example
 
 ```bash
-curl -X POST http://127.0.0.1:5000/get_analysis \
+curl -X POST http://127.0.0.1:5000/evaluation_engine/get_analysis \
   -H "Content-Type: application/json" \
   -d '{
     "image_source": "Data/testImage4.jpeg",
@@ -279,7 +290,7 @@ curl -X POST http://127.0.0.1:5000/get_analysis \
 
 ---
 
-## POST `/checked_json_ocr`
+## POST `/evaluation_engine/checked_json_ocr`
 
 Runs evaluation using already extracted OCR data, or falls back to OCR if a solution image source is provided.
 
@@ -293,9 +304,7 @@ Runs evaluation using already extracted OCR data, or falls back to OCR if a solu
       "text": "Given m = 1500\\ \\mathrm{kg}"
     }
   ],
-  "question": "What is the work to be done...",
-  "collection_name": "optional_collection",
-  "top_k": 5
+  "question": "What is the work to be done..."
 }
 ```
 
@@ -318,28 +327,11 @@ Runs evaluation using already extracted OCR data, or falls back to OCR if a solu
 | `solution_url` | string | Conditional | Image source. Required if `ocr_data` is not provided. |
 | `source` | string | Conditional | Alternate image source field. |
 | `question` | string | No | Original question text. |
-| `collection_name` | string | No | Accepted by the route, but currently not used by the active analyzer. |
-| `top_k` | number | No | Accepted by the route, but currently not used by the active analyzer. |
 
 ### Success Response
 
-Same response format as `/get_analysis`.
-
-```json
-{
-  "response": [
-    {
-      "stepId": "1",
-      "text": "Given m = 1500\\ \\mathrm{kg}",
-      "step_status": "right",
-      "step_weight": 0.5,
-      "topic": "Work and Energy",
-      "step_understanding": "Student identifies the mass.",
-      "description": ""
-    }
-  ]
-}
-```
+Same flat response format as `/evaluation_engine/get_analysis`, with
+`grounding.status` set to `not_requested`.
 
 ### Error Response
 
@@ -352,7 +344,7 @@ Same response format as `/get_analysis`.
 ### Example
 
 ```bash
-curl -X POST http://127.0.0.1:5000/checked_json_ocr \
+curl -X POST http://127.0.0.1:5000/evaluation_engine/checked_json_ocr \
   -H "Content-Type: application/json" \
   -d '{
     "ocr_data": [
@@ -367,7 +359,7 @@ curl -X POST http://127.0.0.1:5000/checked_json_ocr \
 
 ---
 
-## POST `/index_documents`
+## POST `/evaluation_engine/index_documents`
 
 Indexes raw document text into Qdrant for retrieval.
 
@@ -419,7 +411,7 @@ Indexes raw document text into Qdrant for retrieval.
 ### Example
 
 ```bash
-curl -X POST http://127.0.0.1:5000/index_documents \
+curl -X POST http://127.0.0.1:5000/evaluation_engine/index_documents \
   -H "Content-Type: application/json" \
   -d '{
     "collection_name": "science_class_9",
@@ -437,7 +429,7 @@ curl -X POST http://127.0.0.1:5000/index_documents \
 
 ---
 
-## POST `/index_text_documents`
+## POST `/evaluation_engine/index_text_documents`
 
 Indexes local `.txt` files into Qdrant.
 
@@ -485,7 +477,7 @@ Indexes local `.txt` files into Qdrant.
 ### Example
 
 ```bash
-curl -X POST http://127.0.0.1:5000/index_text_documents \
+curl -X POST http://127.0.0.1:5000/evaluation_engine/index_text_documents \
   -H "Content-Type: application/json" \
   -d '{
     "collection_name": "maths_class_10",
@@ -497,7 +489,7 @@ curl -X POST http://127.0.0.1:5000/index_text_documents \
 
 ---
 
-## POST `/evaluated_json_ocr`
+## POST `/evaluation_engine/evaluated_json_ocr`
 
 Placeholder route.
 
@@ -510,7 +502,7 @@ json_ocr evaluated successfully
 ### Example
 
 ```bash
-curl -X POST http://127.0.0.1:5000/evaluated_json_ocr
+curl -X POST http://127.0.0.1:5000/evaluation_engine/evaluated_json_ocr
 ```
 
 ---
@@ -681,6 +673,7 @@ Common variables used by `engines`:
 | --- | --- |
 | `BACKEND_BASE_URL` | Flask engine URL. Defaults to `http://127.0.0.1:5000`. |
 | `ANALYSIS_COLLECTION_NAME` | Optional collection name forwarded to Flask. |
+| `EVALUATION_ENGINE_PATH` | Optional analysis route override. Defaults to `/evaluation_engine/get_analysis`. |
 
 ## Fastify SaaS Backend
 
@@ -709,8 +702,8 @@ APP_DOMAIN
 
 # 5. Notes And Gaps
 
-- `/get_analysis` and `/checked_json_ocr` accept `collection_name` and `top_k`, but the active analyzer currently calls direct evaluation and does not use RAG.
-- `/index_documents` and `/index_text_documents` can populate Qdrant, but indexed data is not used by the main analysis route unless the analyzer is changed to call the RAG evaluator.
+- `/evaluation_engine/get_analysis` is RAG-backed and falls back to question-and-solution evaluation when retrieval is unavailable or below threshold.
+- `/evaluation_engine/checked_json_ocr` intentionally remains the direct, non-RAG endpoint; use `/evaluation_engine/checked_json_ocr_with_rag` when grounding is required.
 - The Fastify backend is a scaffold. Only `/health` is exposed by the app today.
-- Flask routes return raw exception messages in error responses. This is useful during development but should be changed before production.
-- Expensive OCR/evaluation routes currently have no authentication, rate limiting, or request size checks at the Flask layer.
+- Expensive OCR/evaluation routes currently have no authentication or rate limiting at the Flask layer.
+- Flask limits request bodies to 20 MiB by default; set `EVALUATION_MAX_REQUEST_BYTES` to tune the limit.
