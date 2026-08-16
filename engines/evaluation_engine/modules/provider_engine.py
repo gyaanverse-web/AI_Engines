@@ -22,9 +22,9 @@ from ..system_instruction import (
 
 
 GEMINI_CHAT_MODEL = os.getenv("GEMINI_CHAT_MODEL", "gemini-2.5-flash")
-NVIDIA_EMBEDDING_MODEL = os.getenv(
-    "NVIDIA_EMBEDDING_MODEL",
-    "nvidia/nv-embedqa-e5-v5",
+OPENAI_EMBEDDING_MODEL = os.getenv(
+    "OPENAI_EMBEDDING_MODEL",
+    "text-embedding-3-large",
 )
 GEMINI_TEMPERATURE = float(os.getenv("GEMINI_TEMPERATURE", "0"))
 RAG_MIN_SCORE = float(os.getenv("RAG_MIN_SCORE", "0.35"))
@@ -43,7 +43,7 @@ QDRANT_COLLECTION_NAME = os.getenv(
 )
 QDRANT_URL = os.getenv("QDRANT_URL", "http://localhost:6333")
 QDRANT_API_KEY = os.getenv("QDRANT_API_KEY")
-EMBEDDING_VECTOR_SIZE = int(os.getenv("EMBEDDING_VECTOR_SIZE", "4096"))
+EMBEDDING_VECTOR_SIZE = int(os.getenv("EMBEDDING_VECTOR_SIZE", "3072"))
 EMBEDDING_BATCH_SIZE = int(os.getenv("EMBEDDING_BATCH_SIZE", "32"))
 QDRANT_UPSERT_BATCH_SIZE = int(os.getenv("QDRANT_UPSERT_BATCH_SIZE", "50"))
 QDRANT_TIMEOUT = int(os.getenv("QDRANT_TIMEOUT", "120"))
@@ -64,18 +64,14 @@ def _get_openai_client() -> OpenAI:
 
 
 @lru_cache(maxsize=1)
-def _get_nvidia_client = OpenAI(
-    base_url="https://integrate.api.nvidia.com/v1",
-    api_key=os.getenv("NVIDIA_API_KEY")
-)
-if QDRANT_URL == "http://localhost:6333":
-    qdrant_client = QdrantClient(path="qdrant_local_db")
-else:
-    qdrant_client() -> QdrantClient:
+def _get_qdrant_client() -> QdrantClient:
+    if QDRANT_URL == "http://localhost:6333":
+        return QdrantClient(path="qdrant_local_db")
+
     return QdrantClient(
-            url=QDRANT_URL,
-            api_key=QDRANT_API_KEY,
-            timeout=QDRANT_TIMEOUT,
+        url=QDRANT_URL,
+        api_key=QDRANT_API_KEY,
+        timeout=QDRANT_TIMEOUT,
         check_compatibility=False,
     )
 
@@ -850,11 +846,9 @@ def chunk_document_text(text: str, chunk_size: int = 1500, overlap: int = 200):
 
 
 def get_embedding(text: str):
-    response = _get_nvidia_client().embeddings.create(
-        model=NVIDIA_EMBEDDING_MODEL,
+    response = _get_openai_client().embeddings.create(
+        model=OPENAI_EMBEDDING_MODEL,
         input=text,
-        encoding_format="float",
-        extra_body={"input_type": "passage"}
     )
     return response.data[0].embedding
 
@@ -866,11 +860,9 @@ def get_embeddings(texts: list[str], batch_size: int = EMBEDDING_BATCH_SIZE):
     embeddings = []
     for start in range(0, len(texts), batch_size):
         batch = texts[start:start + batch_size]
-        response = _get_nvidia_client().embeddings.create(
-            model=NVIDIA_EMBEDDING_MODEL,
+        response = _get_openai_client().embeddings.create(
+            model=OPENAI_EMBEDDING_MODEL,
             input=batch,
-            encoding_format="float",
-            extra_body={"input_type": "passage"}
         )
         embeddings.extend(item.embedding for item in response.data)
 

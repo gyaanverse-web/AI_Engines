@@ -1,3 +1,4 @@
+import logging
 import os
 from pathlib import Path
 
@@ -17,6 +18,11 @@ def create_app(url_prefix: str = "/evaluation_engine") -> Flask:
     from .routes import api_blueprint
 
     app = Flask(__name__)
+    log_level_name = os.getenv("EVALUATION_LOG_LEVEL", "INFO").upper()
+    log_level = getattr(logging, log_level_name, logging.INFO)
+    app.logger.setLevel(log_level)
+    for handler in app.logger.handlers:
+        handler.setLevel(log_level)
     app.config["MAX_CONTENT_LENGTH"] = int(
         os.getenv("EVALUATION_MAX_REQUEST_BYTES", str(20 * 1024 * 1024))
     )

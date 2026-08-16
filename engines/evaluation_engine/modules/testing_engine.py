@@ -1,5 +1,6 @@
 import logging
 import re
+import time
 from typing import Any
 
 from question_analysis.categories import CATEGORY_KEYS
@@ -347,6 +348,12 @@ def _get_rag_context(
     collection_name: str,
     top_k: int,
 ) -> tuple[str, str | None, list[dict[str, Any]]]:
+    logger.info(
+        "RAG retrieval started collection=%s top_k=%s evaluation_steps=%s",
+        collection_name,
+        top_k,
+        len(steps),
+    )
     try:
         relevant_chunks = retrieve_relevant_chunks(
             query=_build_retrieval_query(question, steps),
@@ -358,6 +365,7 @@ def _get_rag_context(
         return "", "retrieval_error", []
 
     if not relevant_chunks:
+        logger.info("RAG retrieval returned no chunks collection=%s", collection_name)
         return "", "no_context", []
 
     grounded_chunks = [
@@ -366,6 +374,13 @@ def _get_rag_context(
         if isinstance(chunk.get("score"), (int, float)) and chunk["score"] >= RAG_MIN_SCORE
     ]
     if not grounded_chunks:
+        logger.info(
+            "RAG retrieval found no chunks above threshold collection=%s "
+            "retrieved=%s min_score=%.3f",
+            collection_name,
+            len(relevant_chunks),
+            RAG_MIN_SCORE,
+        )
         return "", "context_issue", []
 
     context_parts = []
@@ -392,6 +407,14 @@ def _get_rag_context(
         )
 
     context = "\n\n".join(context_parts)
+    logger.info(
+        "RAG retrieval completed collection=%s retrieved=%s grounded=%s "
+        "context_chars=%s",
+        collection_name,
+        len(relevant_chunks),
+        len(sources),
+        len(context),
+    )
     return context, None if context else "context_issue", sources
 
 
@@ -1001,8 +1024,15 @@ def _evaluate_reconstructed_steps(
     question_parts: list[dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     if not steps:
+        logger.info("Step evaluation skipped because no logical steps were found")
         return []
 
+    logger.info(
+        "Step evaluation model request started model=%s steps=%s rag_context=%s",
+        GEMINI_CHAT_MODEL,
+        len(steps),
+        bool(context),
+    )
     solution_profile = _build_solution_profile(
         question=question,
         steps=steps,
@@ -1068,6 +1098,11 @@ def _evaluate_reconstructed_steps(
     )
 
     raw_results = parsed_response.get("response", []) if isinstance(parsed_response, dict) else []
+    logger.info(
+        "Step evaluation model response received requested_steps=%s returned_steps=%s",
+        len(steps),
+        len(raw_results),
+    )
     results_by_step_id = {
         str(item.get("stepId", "")).strip(): item
         for item in raw_results
@@ -1082,15 +1117,49 @@ def _evaluate_reconstructed_steps(
             step=step,
             raw_result=results_by_step_id.get(step["stepId"], {}),
         )
-        final_results.append(
-            _post_process_step_result(
-                question=question,
-                steps=steps,
-                index=index,
-                step_result=finalized_step,
-            )
+        processed_step = _post_process_step_result(
+            question=question,
+            steps=steps,
+            index=index,
+            step_result=finalized_step,
+        )
+        final_results.append(processed_step)
+        logger.info(
+            "Evaluation step completed position=%s/%s step_id=%s status=%s "
+            "type=%s weight=%s",
+            index + 1,
+            len(steps),
+            processed_step.get("stepId"),
+            processed_step.get("step_status"),
+            processed_step.get("step_type"),
+            processed_step.get("step_weight"),
         )
     return final_results
+
+
+def _log_evaluation_completed(
+    *,
+    mode: str,
+    final_results: list[dict[str, Any]],
+    started_at: float,
+    grounding_status: str,
+) -> None:
+    status_counts = {
+        status: sum(1 for step in final_results if step.get("step_status") == status)
+        for status in sorted(STATUS_VALUES)
+    }
+    logger.info(
+        "Evaluation completed mode=%s steps=%s right=%s wrong=%s incomplete=%s "
+        "unknown=%s grounding=%s duration_ms=%.1f",
+        mode,
+        len(final_results),
+        status_counts["right"],
+        status_counts["wrong"],
+        status_counts["incomplete"],
+        status_counts["unknown"],
+        grounding_status,
+        (time.perf_counter() - started_at) * 1000,
+    )
 
 
 def _build_response_payload(
@@ -1120,8 +1189,13 @@ def evaluate_ocr_steps(
     question: str = "",
     full_marks: float | None = None,
 ):
+    started_at = time.perf_counter()
     normalized_steps = _normalize_ocr_steps(ocr_data)
-    logger.info("Evaluating %s OCR steps", len(normalized_steps))
+    logger.info(
+        "Evaluation started mode=standard input_steps=%s normalized_steps=%s",
+        len(ocr_data),
+        len(normalized_steps),
+    )
     normalized_question = _normalize_latex_text(question.strip())
     reconstructed_steps = _reconstruct_solution_steps(normalized_steps, normalized_question)
     logger.info("Reconstructed OCR into %s logical steps", len(reconstructed_steps))
@@ -1134,7 +1208,12 @@ def evaluate_ocr_steps(
         question_profile=question_profile,
         question_parts=question_parts,
     )
-    logger.info("OCR evaluation completed")
+    _log_evaluation_completed(
+        mode="standard",
+        final_results=final_results,
+        started_at=started_at,
+        grounding_status="not_requested",
+    )
     return _build_response_payload(
         final_results=final_results,
         full_marks=_coerce_full_marks(full_marks),
@@ -1149,11 +1228,19 @@ def evaluate_ocr_steps_with_rag(
     top_k: int = 5,
     full_marks: float | None = None,
 ):
+    started_at = time.perf_counter()
     collection_name = _validate_collection_name(collection_name)
     if isinstance(top_k, bool) or not isinstance(top_k, int) or not 1 <= top_k <= 20:
         raise ValueError("top_k must be an integer between 1 and 20")
     normalized_steps = _normalize_ocr_steps(ocr_data)
-    logger.info("Evaluating %s OCR steps with RAG", len(normalized_steps))
+    logger.info(
+        "Evaluation started mode=rag input_steps=%s normalized_steps=%s "
+        "collection=%s top_k=%s",
+        len(ocr_data),
+        len(normalized_steps),
+        collection_name,
+        top_k,
+    )
     normalized_question = _normalize_latex_text(question.strip())
     reconstructed_steps = _reconstruct_solution_steps(normalized_steps, normalized_question)
     logger.info("Reconstructed OCR into %s logical steps", len(reconstructed_steps))
@@ -1173,11 +1260,17 @@ def evaluate_ocr_steps_with_rag(
         context=context,
         question_parts=question_parts,
     )
-    logger.info("RAG-backed OCR evaluation completed")
+    grounding_status = "used" if context else "fallback"
+    _log_evaluation_completed(
+        mode="rag",
+        final_results=final_results,
+        started_at=started_at,
+        grounding_status=grounding_status,
+    )
     return _build_response_payload(
         final_results=final_results,
         full_marks=_coerce_full_marks(full_marks),
-        grounding_status="used" if context else "fallback",
+        grounding_status=grounding_status,
         grounding_reason=fallback_reason,
         rag_sources=rag_sources,
         collection_name=collection_name,
