@@ -13,6 +13,7 @@ engines/.venv/
 # Environment and local configuration
 .env
 .env.*
+!engines/.env.example
 *.local
 
 # Build and packaging artifacts

@@ -1,8 +1,0 @@
-Flask
-mpxpy
-openai
-python-dotenv
-qdrant-client
-pillow
-sympy
-pypdf
