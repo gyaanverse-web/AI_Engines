@@ -3,3 +3,6 @@ google-genai
 openai
 python-dotenv
 qdrant-client
+pillow
+sympy
+pypdf
